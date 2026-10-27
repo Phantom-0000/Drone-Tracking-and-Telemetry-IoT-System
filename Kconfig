@@ -1,0 +1,35 @@
+source "Kconfig.zephyr"
+
+menu "Drone telemetry application"
+
+config APP_IMU_SAMPLE_HZ
+    int "IMU sample rate"
+    default 25
+    range 1 200
+    help
+      Application-facing MPU6050 acquisition rate. The mandatory baseline
+      freezes this value at 25 Hz.
+
+config APP_GPS_UPDATE_PERIOD_MS
+    int "GPS update period in milliseconds"
+    default 1000
+    range 100 60000
+
+config APP_ENVIRONMENT_PERIOD_MS
+    int "Environment update period in milliseconds"
+    default 2000
+    range 100 60000
+
+config APP_SIMU_PERIOD_MS
+    int "SIMU output period in milliseconds"
+    default 100
+    range 10 1000
+
+config APP_ENABLE_ADVANCED_MODE
+    bool "Enable the reserved ADVANCED MODE transition"
+    default n
+    help
+      Keep disabled until the intermediate assessment grants access and the
+      instructors assign an advanced requirement.
+
+endmenu

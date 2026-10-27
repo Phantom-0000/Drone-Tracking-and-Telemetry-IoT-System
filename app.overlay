@@ -1,0 +1,17 @@
+/*
+ * Board-independent application configuration.
+ *
+ * Physical pin assignments, sensor addresses, UART routing, ADC channel,
+ * LED polarity, and B1 GPIO are intentionally deferred until the hardware
+ * wiring is frozen during sensor integration.
+ */
+
+/ {
+    telemetry_app: telemetry_app {
+        status = "okay";
+        imu-sample-hz = <25>;
+        gps-update-period-ms = <1000>;
+        environment-period-ms = <2000>;
+        simu-period-ms = <100>;
+    };
+};

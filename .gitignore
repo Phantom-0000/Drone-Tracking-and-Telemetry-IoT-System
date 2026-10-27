@@ -1,0 +1,15 @@
+build/
+**/build/
+.cache/
+.zephyr/
+.vscode/
+documents/
+extracted_internal.txt
+extract_internal.py
+*.elf
+*.hex
+*.bin
+*.map
+*.log
+*.pyc
+__pycache__/
