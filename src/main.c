@@ -3,7 +3,9 @@
 #include <zephyr/sys/atomic.h>
 #include <zephyr/sys/util.h>
 
+#include "sensor_contract.h"
 #include "telemetry_snapshot.h"
+#include "processing.h"
 
 #define APP_NODE DT_NODELABEL(telemetry_app)
 
@@ -37,6 +39,31 @@ K_TIMER_DEFINE(output_timer, NULL, NULL);
 
 static struct telemetry_snapshot snapshot;
 static atomic_t active_mode;
+static struct processing_engine processing_engine;
+
+#if CONFIG_APP_USE_MOCK_SENSORS
+static const struct ldr_calibration ldr_calibration = {
+    .dark_raw = CONFIG_APP_LDR_DARK_RAW,
+    .maximum_raw = CONFIG_APP_LDR_MAX_RAW,
+};
+#endif
+
+#if CONFIG_APP_USE_MOCK_SENSORS
+static void publish_imu_sample(const struct imu_sample *sample)
+{
+    struct imu_event event = {
+        .kind = IMU_EVENT_SAMPLE,
+        .result = SENSOR_OK,
+        .sample = *sample,
+    };
+
+    if (k_msgq_put(&imu_event_queue, &event, K_NO_WAIT) != 0) {
+        k_mutex_lock(&snapshot_mutex, K_FOREVER);
+        snapshot.flags |= TELEMETRY_FLAG_IMU_INVALID;
+        k_mutex_unlock(&snapshot_mutex);
+    }
+}
+#endif
 
 static void publish_imu_fault(enum sensor_result result, uint32_t timestamp_ms)
 {
@@ -60,8 +87,20 @@ static void imu_thread(void *p1, void *p2, void *p3)
     ARG_UNUSED(p3);
 
     while (true) {
-        /* Sensor access is intentionally a Phase 4 integration point. */
-        publish_imu_fault(SENSOR_NOT_READY, k_uptime_get_32());
+#if CONFIG_APP_USE_MOCK_SENSORS
+        struct imu_sample sample;
+#endif
+        uint32_t timestamp_ms = k_uptime_get_32();
+
+#if CONFIG_APP_USE_MOCK_SENSORS
+        if (sensor_mock_read_imu(timestamp_ms, &sample) == SENSOR_OK) {
+            publish_imu_sample(&sample);
+        } else {
+            publish_imu_fault(SENSOR_INVALID, timestamp_ms);
+        }
+#else
+        publish_imu_fault(SENSOR_NOT_READY, timestamp_ms);
+#endif
         k_msleep(IMU_PERIOD_MS);
     }
 }
@@ -73,7 +112,37 @@ static void gps_thread(void *p1, void *p2, void *p3)
     ARG_UNUSED(p3);
 
     while (true) {
-        /* UART receive and NMEA parsing are added during sensor integration. */
+#if CONFIG_APP_USE_MOCK_SENSORS
+        struct gps_sample gps;
+        enum sensor_result result =
+            sensor_mock_read_gps(k_uptime_get_32(), &gps);
+
+        k_mutex_lock(&snapshot_mutex, K_FOREVER);
+        if (result == SENSOR_OK) {
+            snapshot.latitude_deg = gps.latitude_deg;
+            snapshot.longitude_deg = gps.longitude_deg;
+            snapshot.altitude_m = gps.altitude_m;
+            snapshot.satellites = gps.satellites;
+            snapshot.gps_utc_hour = gps.utc_hour;
+            snapshot.gps_utc_minute = gps.utc_minute;
+            snapshot.gps_utc_second = gps.utc_second;
+            snapshot.gps_fix = gps.fix_valid;
+            snapshot.gps_utc_valid = gps.utc_valid;
+            snapshot.gps_timestamp_ms = gps.timestamp_ms;
+            if (gps.fix_valid) {
+                snapshot.flags &= ~TELEMETRY_FLAG_GPS_INVALID;
+            } else {
+                snapshot.flags |= TELEMETRY_FLAG_GPS_INVALID;
+            }
+        } else {
+            snapshot.flags |= TELEMETRY_FLAG_GPS_INVALID;
+        }
+        k_mutex_unlock(&snapshot_mutex);
+#else
+        k_mutex_lock(&snapshot_mutex, K_FOREVER);
+        snapshot.flags |= TELEMETRY_FLAG_GPS_INVALID;
+        k_mutex_unlock(&snapshot_mutex);
+#endif
         k_msleep(GPS_PERIOD_MS);
     }
 }
@@ -85,7 +154,40 @@ static void environment_thread(void *p1, void *p2, void *p3)
     ARG_UNUSED(p3);
 
     while (true) {
-        /* Si7021 and LDR acquisition are added during sensor integration. */
+#if CONFIG_APP_USE_MOCK_SENSORS
+        uint32_t timestamp_ms = k_uptime_get_32();
+        struct environment_sample environment;
+        struct ldr_sample ldr;
+        float light_percent;
+        enum sensor_result environment_result =
+            sensor_mock_read_environment(timestamp_ms, &environment);
+        enum sensor_result ldr_result =
+            sensor_mock_read_ldr(timestamp_ms, &ldr);
+
+        k_mutex_lock(&snapshot_mutex, K_FOREVER);
+        if (environment_result == SENSOR_OK) {
+            snapshot.temperature_c = environment.temperature_c;
+            snapshot.humidity_percent = environment.humidity_percent;
+            snapshot.flags &= ~TELEMETRY_FLAG_SI7021_INVALID;
+        } else {
+            snapshot.flags |= TELEMETRY_FLAG_SI7021_INVALID;
+        }
+
+        if (ldr_result == SENSOR_OK &&
+            ldr_map_percent(ldr.adc_raw, timestamp_ms, &ldr_calibration,
+                            &ldr, &light_percent) == SENSOR_OK) {
+            snapshot.light_percent = light_percent;
+            snapshot.flags &= ~TELEMETRY_FLAG_LDR_INVALID;
+        } else {
+            snapshot.flags |= TELEMETRY_FLAG_LDR_INVALID;
+        }
+        k_mutex_unlock(&snapshot_mutex);
+#else
+        k_mutex_lock(&snapshot_mutex, K_FOREVER);
+        snapshot.flags |= TELEMETRY_FLAG_SI7021_INVALID |
+                          TELEMETRY_FLAG_LDR_INVALID;
+        k_mutex_unlock(&snapshot_mutex);
+#endif
         k_msleep(ENVIRONMENT_PERIOD_MS);
     }
 }
@@ -95,6 +197,20 @@ static void processing_thread(void *p1, void *p2, void *p3)
     ARG_UNUSED(p1);
     ARG_UNUSED(p2);
     ARG_UNUSED(p3);
+
+    const struct state_detector_config detector_config = {
+        .idle_acceleration_tolerance_mps2 =
+            (float)CONFIG_APP_IDLE_ACCEL_TOLERANCE_MILLI_MPS2 / 1000.0f,
+        .idle_gyro_threshold_dps = (float)CONFIG_APP_IDLE_GYRO_THRESHOLD_DPS,
+        .flying_acceleration_threshold_mps2 =
+            (float)CONFIG_APP_FLYING_ACCEL_THRESHOLD_MILLI_MPS2 / 1000.0f,
+        .flying_gyro_threshold_dps = (float)CONFIG_APP_FLYING_GYRO_THRESHOLD_DPS,
+        .idle_persistence_ms = CONFIG_APP_IDLE_PERSISTENCE_MS,
+        .flying_persistence_ms = CONFIG_APP_FLYING_PERSISTENCE_MS,
+        .problem_persistence_ms = CONFIG_APP_PROBLEM_PERSISTENCE_MS,
+    };
+
+    processing_engine_init(&processing_engine, &detector_config);
 
     while (true) {
         struct imu_event event;
@@ -111,8 +227,13 @@ static void processing_thread(void *p1, void *p2, void *p3)
             snapshot.gy_dps = event.sample.gy_dps;
             snapshot.gz_dps = event.sample.gz_dps;
             snapshot.flags &= ~TELEMETRY_FLAG_IMU_INVALID;
+            processing_engine_process_imu(&processing_engine,
+                                          &event.sample, &snapshot);
         } else {
             snapshot.flags |= TELEMETRY_FLAG_IMU_INVALID;
+            processing_engine_process_imu_fault(&processing_engine,
+                                                event.sample.timestamp_ms,
+                                                &snapshot);
         }
 
         k_mutex_unlock(&snapshot_mutex);

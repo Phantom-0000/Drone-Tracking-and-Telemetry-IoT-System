@@ -6,6 +6,8 @@ project(drone_telemetry)
 target_sources(app PRIVATE
     src/main.c
     src/compatibility_hooks.c
+    src/sensor_contract.c
+    src/processing.c
 )
 
 target_include_directories(app PRIVATE include)

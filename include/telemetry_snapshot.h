@@ -77,6 +77,27 @@ struct imu_event {
     struct imu_sample sample;
 };
 
+struct telemetry_statistics {
+    uint32_t window_end_ms;
+    uint32_t valid_samples;
+    float light_mean;
+    float light_min;
+    float light_max;
+    float temperature_mean;
+    float temperature_min;
+    float temperature_max;
+    float humidity_mean;
+    float humidity_min;
+    float humidity_max;
+    float acceleration_mean;
+    float acceleration_min;
+    float acceleration_max;
+    float angular_velocity_mean;
+    float angular_velocity_min;
+    float angular_velocity_max;
+    bool valid;
+};
+
 struct telemetry_snapshot {
     uint32_t timestamp_ms;
 
@@ -94,6 +115,7 @@ struct telemetry_snapshot {
     double latitude_deg;
     double longitude_deg;
     float altitude_m;
+    uint32_t gps_timestamp_ms;
     uint8_t satellites;
     uint8_t gps_utc_hour;
     uint8_t gps_utc_minute;
@@ -115,6 +137,7 @@ struct telemetry_snapshot {
 
     enum tracker_state state;
     uint16_t flags;
+    struct telemetry_statistics statistics;
 };
 
 #endif /* TELEMETRY_SNAPSHOT_H */

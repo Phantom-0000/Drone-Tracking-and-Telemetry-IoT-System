@@ -32,4 +32,56 @@ config APP_ENABLE_ADVANCED_MODE
       Keep disabled until the intermediate assessment grants access and the
       instructors assign an advanced requirement.
 
+config APP_USE_MOCK_SENSORS
+    bool "Use deterministic mock sensor data"
+    default y
+    help
+      Keep the application testable before the hardware is connected. Set to
+      n when the real sensor backends are ready.
+
+config APP_LDR_DARK_RAW
+    int "LDR dark calibration ADC value"
+    default 100
+    range 0 65535
+
+config APP_LDR_MAX_RAW
+    int "LDR maximum-light calibration ADC value"
+    default 900
+    range 1 65535
+
+config APP_IDLE_ACCEL_TOLERANCE_MILLI_MPS2
+    int "IDLE acceleration tolerance in milli-m/s2"
+    default 300
+    range 1 10000
+
+config APP_IDLE_GYRO_THRESHOLD_DPS
+    int "IDLE gyro magnitude threshold in deg/s"
+    default 5
+    range 1 360
+
+config APP_FLYING_ACCEL_THRESHOLD_MILLI_MPS2
+    int "FLYING dynamic acceleration threshold in milli-m/s2"
+    default 800
+    range 1 10000
+
+config APP_FLYING_GYRO_THRESHOLD_DPS
+    int "FLYING gyro magnitude threshold in deg/s"
+    default 15
+    range 1 360
+
+config APP_IDLE_PERSISTENCE_MS
+    int "IDLE persistence time in milliseconds"
+    default 1000
+    range 0 60000
+
+config APP_FLYING_PERSISTENCE_MS
+    int "FLYING persistence time in milliseconds"
+    default 500
+    range 0 60000
+
+config APP_PROBLEM_PERSISTENCE_MS
+    int "PROBLEM persistence time in milliseconds"
+    default 1000
+    range 0 60000
+
 endmenu
