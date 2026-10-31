@@ -8,6 +8,7 @@ target_sources(app PRIVATE
     src/compatibility_hooks.c
     src/sensor_contract.c
     src/processing.c
+    src/mode_manager.c
 )
 
 target_include_directories(app PRIVATE include)

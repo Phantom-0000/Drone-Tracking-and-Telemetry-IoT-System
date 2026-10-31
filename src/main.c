@@ -6,6 +6,7 @@
 #include "sensor_contract.h"
 #include "telemetry_snapshot.h"
 #include "processing.h"
+#include "mode_manager.h"
 
 #define APP_NODE DT_NODELABEL(telemetry_app)
 
@@ -16,30 +17,22 @@
 #define IMU_PERIOD_MS (1000U / CONFIG_APP_IMU_SAMPLE_HZ)
 #define GPS_PERIOD_MS CONFIG_APP_GPS_UPDATE_PERIOD_MS
 #define ENVIRONMENT_PERIOD_MS CONFIG_APP_ENVIRONMENT_PERIOD_MS
-#define SIMU_PERIOD_MS CONFIG_APP_SIMU_PERIOD_MS
 
 BUILD_ASSERT(CONFIG_APP_IMU_SAMPLE_HZ == 25,
              "The mandatory baseline uses a 25 Hz IMU rate");
 BUILD_ASSERT(CONFIG_APP_SIMU_PERIOD_MS == 100,
              "The mandatory SIMU period is 100 ms");
 
-enum app_mode {
-    APP_MODE_TEST = 0,
-    APP_MODE_NORMAL,
-    APP_MODE_SIMU,
-#if CONFIG_APP_ENABLE_ADVANCED_MODE
-    APP_MODE_ADVANCED,
-#endif
-};
-
 K_MSGQ_DEFINE(imu_event_queue, sizeof(struct imu_event), 8, 4);
+K_MSGQ_DEFINE(mode_button_queue, sizeof(uint32_t), 4, 4);
 K_MUTEX_DEFINE(snapshot_mutex);
-K_SEM_DEFINE(mode_event, 0, 1);
 K_TIMER_DEFINE(output_timer, NULL, NULL);
 
 static struct telemetry_snapshot snapshot;
 static atomic_t active_mode;
+static atomic_t active_led;
 static struct processing_engine processing_engine;
+static struct mode_manager mode_manager;
 
 #if CONFIG_APP_USE_MOCK_SENSORS
 static const struct ldr_calibration ldr_calibration = {
@@ -254,10 +247,28 @@ static void output_thread(void *p1, void *p2, void *p3)
         local_snapshot = snapshot;
         k_mutex_unlock(&snapshot_mutex);
 
-        /* Formatting and the sole VCOM write path are added in Phase 6/7. */
+        /*
+         * Phase 6 owns the mode-dependent schedule and LED policy. Phase 7
+         * adds the actual TEST/NORMAL/SIMU formatters to this sole VCOM
+         * writer.
+         */
+        enum app_mode mode = (enum app_mode)atomic_get(&active_mode);
+        enum tracker_state state = local_snapshot.state;
+        atomic_set(&active_led,
+                   mode_manager_led_for(mode, state));
         ARG_UNUSED(local_snapshot);
-        (void)atomic_get(&active_mode);
+        ARG_UNUSED(mode);
     }
+}
+
+/*
+ * Hardware GPIO setup is intentionally deferred until the B1 pin is frozen.
+ * The eventual GPIO callback can call this function from thread or ISR
+ * context; mode_thread performs the debounced transition and timer update.
+ */
+void app_b1_button_pressed(uint32_t timestamp_ms)
+{
+    (void)k_msgq_put(&mode_button_queue, &timestamp_ms, K_NO_WAIT);
 }
 
 static void mode_thread(void *p1, void *p2, void *p3)
@@ -267,8 +278,24 @@ static void mode_thread(void *p1, void *p2, void *p3)
     ARG_UNUSED(p3);
 
     while (true) {
-        (void)k_sem_take(&mode_event, K_FOREVER);
-        /* B1 GPIO handling and mode transitions are added in Phase 6. */
+        uint32_t timestamp_ms;
+
+        (void)k_msgq_get(&mode_button_queue, &timestamp_ms, K_FOREVER);
+        if (!mode_manager_accept_button(&mode_manager, timestamp_ms)) {
+            continue;
+        }
+
+        mode_manager.mode = mode_manager_next_mode(mode_manager.mode);
+        atomic_set(&active_mode, mode_manager.mode);
+        enum tracker_state state;
+
+        k_mutex_lock(&snapshot_mutex, K_FOREVER);
+        state = snapshot.state;
+        k_mutex_unlock(&snapshot_mutex);
+        atomic_set(&active_led, mode_manager_led_for(mode_manager.mode, state));
+        k_timer_start(&output_timer,
+                      K_MSEC(mode_manager_period_ms(mode_manager.mode)),
+                      K_MSEC(mode_manager_period_ms(mode_manager.mode)));
     }
 }
 
@@ -281,9 +308,14 @@ K_THREAD_DEFINE(mode_thread_id, 1024, mode_thread, NULL, NULL, NULL, 9, 0, 0);
 
 int main(void)
 {
-    atomic_set(&active_mode, APP_MODE_TEST);
+    mode_manager_init(&mode_manager, CONFIG_APP_MODE_BUTTON_DEBOUNCE_MS);
+    atomic_set(&active_mode, mode_manager.mode);
+    atomic_set(&active_led,
+               mode_manager_led_for(mode_manager.mode, TRACKER_STATE_IDLE));
     snapshot.state = TRACKER_STATE_IDLE;
-    k_timer_start(&output_timer, K_MSEC(SIMU_PERIOD_MS), K_MSEC(SIMU_PERIOD_MS));
+    k_timer_start(&output_timer,
+                  K_MSEC(mode_manager_period_ms(mode_manager.mode)),
+                  K_MSEC(mode_manager_period_ms(mode_manager.mode)));
 
     return 0;
 }

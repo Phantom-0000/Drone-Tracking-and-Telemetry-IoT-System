@@ -25,6 +25,21 @@ config APP_SIMU_PERIOD_MS
     default 100
     range 10 1000
 
+config APP_TEST_PERIOD_MS
+    int "TEST output period in milliseconds"
+    default 2000
+    range 100 60000
+
+config APP_NORMAL_PERIOD_MS
+    int "NORMAL output period in milliseconds"
+    default 5000
+    range 100 60000
+
+config APP_MODE_BUTTON_DEBOUNCE_MS
+    int "B1 button debounce interval in milliseconds"
+    default 200
+    range 0 5000
+
 config APP_ENABLE_ADVANCED_MODE
     bool "Enable the reserved ADVANCED MODE transition"
     default n
