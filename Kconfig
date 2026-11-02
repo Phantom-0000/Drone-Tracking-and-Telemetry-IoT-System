@@ -40,6 +40,11 @@ config APP_MODE_BUTTON_DEBOUNCE_MS
     default 200
     range 0 5000
 
+config APP_REPORT_BUFFER_SIZE
+    int "TEST/NORMAL report buffer size"
+    default 1536
+    range 512 4096
+
 config APP_ENABLE_ADVANCED_MODE
     bool "Enable the reserved ADVANCED MODE transition"
     default n

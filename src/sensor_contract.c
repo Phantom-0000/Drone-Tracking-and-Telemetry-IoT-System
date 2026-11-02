@@ -1,5 +1,7 @@
 #include "sensor_contract.h"
 
+#include <errno.h>
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -74,9 +76,12 @@ enum sensor_result ldr_map_percent(uint16_t adc_raw,
 
     out->timestamp_ms = timestamp_ms;
     out->adc_raw = adc_raw;
-    if (adc_raw <= calibration->dark_raw) {
+    if (adc_raw < calibration->dark_raw ||
+        adc_raw > calibration->maximum_raw) {
+        return SENSOR_INVALID;
+    } else if (adc_raw == calibration->dark_raw) {
         mapped = 0.0f;
-    } else if (adc_raw >= calibration->maximum_raw) {
+    } else if (adc_raw == calibration->maximum_raw) {
         mapped = 100.0f;
     } else {
         mapped = 100.0f * (float)(adc_raw - calibration->dark_raw) /
@@ -110,6 +115,83 @@ static bool next_field(char **cursor, char *field, size_t field_size)
     return true;
 }
 
+static int hex_digit_value(char value)
+{
+    if (value >= '0' && value <= '9') {
+        return value - '0';
+    }
+    if (value >= 'A' && value <= 'F') {
+        return value - 'A' + 10;
+    }
+    if (value >= 'a' && value <= 'f') {
+        return value - 'a' + 10;
+    }
+    return -1;
+}
+
+static bool nmea_checksum_valid(const char *line, const char *checksum_marker)
+{
+    unsigned int checksum = 0U;
+    int high;
+    int low;
+
+    if (line == NULL || checksum_marker == NULL || checksum_marker <= line ||
+        line[0] != '$') {
+        return false;
+    }
+    for (const char *cursor = line + 1; cursor < checksum_marker; ++cursor) {
+        checksum ^= (unsigned char)*cursor;
+    }
+    if (checksum_marker[1] == '\0' || checksum_marker[2] == '\0') {
+        return false;
+    }
+    high = hex_digit_value(checksum_marker[1]);
+    low = hex_digit_value(checksum_marker[2]);
+    if (high < 0 || low < 0) {
+        return false;
+    }
+    if (checksum_marker[3] != '\0' && checksum_marker[3] != '\r' &&
+        checksum_marker[3] != '\n') {
+        return false;
+    }
+    return checksum == (unsigned int)((high << 4) | low);
+}
+
+static bool parse_long_strict(const char *text, long *value)
+{
+    char *end;
+    long parsed;
+
+    if (text == NULL || value == NULL || text[0] == '\0') {
+        return false;
+    }
+    errno = 0;
+    parsed = strtol(text, &end, 10);
+    if (errno == ERANGE || end == text || *end != '\0') {
+        return false;
+    }
+    *value = parsed;
+    return true;
+}
+
+static bool parse_double_strict(const char *text, double *value)
+{
+    char *end;
+    double parsed;
+
+    if (text == NULL || value == NULL || text[0] == '\0') {
+        return false;
+    }
+    errno = 0;
+    parsed = strtod(text, &end);
+    if (errno == ERANGE || end == text || *end != '\0' ||
+        !isfinite(parsed)) {
+        return false;
+    }
+    *value = parsed;
+    return true;
+}
+
 static bool parse_nmea_coordinate(const char *value,
                                   const char *hemisphere,
                                   bool latitude,
@@ -123,11 +205,16 @@ static bool parse_nmea_coordinate(const char *value,
         return false;
     }
 
-    raw = strtod(value, NULL);
-    whole_degrees = latitude ? (double)((int)(raw / 100.0))
-                             : (double)((int)(raw / 100.0));
+    if (!parse_double_strict(value, &raw) || raw < 0.0) {
+        return false;
+    }
+    whole_degrees = floor(raw / 100.0);
     minutes = raw - (whole_degrees * 100.0);
     if (minutes < 0.0 || minutes >= 60.0) {
+        return false;
+    }
+    if (whole_degrees > (latitude ? 90.0 : 180.0) ||
+        (whole_degrees == (latitude ? 90.0 : 180.0) && minutes != 0.0)) {
         return false;
     }
 
@@ -147,7 +234,7 @@ enum sensor_result gps_parse_gga(const char *line, struct gps_sample *out)
     char *cursor;
     char *end;
     int field_index = 0;
-    int fix_quality;
+    long fix_quality;
     long satellites;
     double latitude;
     double longitude;
@@ -166,9 +253,10 @@ enum sensor_result gps_parse_gga(const char *line, struct gps_sample *out)
 
     strcpy(buffer, line);
     end = strchr(buffer, '*');
-    if (end != NULL) {
-        *end = '\0';
+    if (!nmea_checksum_valid(buffer, end)) {
+        return SENSOR_INVALID;
     }
+    *end = '\0';
 
     cursor = buffer;
     while (next_field(&cursor, field, sizeof(field))) {
@@ -212,16 +300,20 @@ enum sensor_result gps_parse_gga(const char *line, struct gps_sample *out)
         return SENSOR_INVALID;
     }
 
-    fix_quality = (int)strtol(fix_field, NULL, 10);
-    satellites = strtol(satellite_field, NULL, 10);
-    if (satellites < 0L || satellites > 99L) {
+    if (!parse_long_strict(fix_field, &fix_quality) || fix_quality < 0L ||
+        !parse_long_strict(satellite_field, &satellites) || satellites < 0L ||
+        satellites > 99L) {
         return SENSOR_INVALID;
     }
 
     memset(out, 0, sizeof(*out));
-    out->satellites = (uint8_t)satellites;
     out->fix_valid = fix_quality > 0;
     if (time_field[0] != '\0' && strlen(time_field) >= 6U) {
+        for (size_t index = 0U; index < 6U; ++index) {
+            if (time_field[index] < '0' || time_field[index] > '9') {
+                return SENSOR_INVALID;
+            }
+        }
         out->utc_hour = (uint8_t)((time_field[0] - '0') * 10 + time_field[1] - '0');
         out->utc_minute = (uint8_t)((time_field[2] - '0') * 10 + time_field[3] - '0');
         out->utc_second = (uint8_t)((time_field[4] - '0') * 10 + time_field[5] - '0');
@@ -230,6 +322,7 @@ enum sensor_result gps_parse_gga(const char *line, struct gps_sample *out)
     }
 
     if (!out->fix_valid) {
+        out->satellites = 0U;
         return SENSOR_OK;
     }
     if (!parse_nmea_coordinate(latitude_field, latitude_hemisphere, true, &latitude) ||
@@ -239,7 +332,15 @@ enum sensor_result gps_parse_gga(const char *line, struct gps_sample *out)
 
     out->latitude_deg = latitude;
     out->longitude_deg = longitude;
-    out->altitude_m = (float)strtod(altitude_field, NULL);
+    {
+        double altitude;
+
+        if (!parse_double_strict(altitude_field, &altitude)) {
+            return SENSOR_INVALID;
+        }
+        out->altitude_m = (float)altitude;
+    }
+    out->satellites = (uint8_t)satellites;
     return SENSOR_OK;
 }
 
@@ -257,7 +358,7 @@ enum sensor_result sensor_mock_read_gps(uint32_t timestamp_ms,
                                         struct gps_sample *out)
 {
     static const char gga[] =
-        "$GPGGA,123456.00,4038.9462,N,00337.6450,W,1,08,1.0,628.4,M,0.0,M,,*00";
+        "$GPGGA,123456.00,4038.9462,N,00337.6450,W,1,08,1.0,628.4,M,0.0,M,,*4E";
     enum sensor_result result = gps_parse_gga(gga, out);
 
     if (result == SENSOR_OK && out != NULL) {

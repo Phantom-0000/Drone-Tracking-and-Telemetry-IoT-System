@@ -1,12 +1,15 @@
 #include <zephyr/devicetree.h>
 #include <zephyr/kernel.h>
 #include <zephyr/sys/atomic.h>
+#include <zephyr/sys/printk.h>
 #include <zephyr/sys/util.h>
 
 #include "sensor_contract.h"
 #include "telemetry_snapshot.h"
 #include "processing.h"
 #include "mode_manager.h"
+#include "simu_protocol.h"
+#include "output_formatter.h"
 
 #define APP_NODE DT_NODELABEL(telemetry_app)
 
@@ -33,6 +36,7 @@ static atomic_t active_mode;
 static atomic_t active_led;
 static struct processing_engine processing_engine;
 static struct mode_manager mode_manager;
+static uint16_t simu_sequence;
 
 #if CONFIG_APP_USE_MOCK_SENSORS
 static const struct ldr_calibration ldr_calibration = {
@@ -112,10 +116,6 @@ static void gps_thread(void *p1, void *p2, void *p3)
 
         k_mutex_lock(&snapshot_mutex, K_FOREVER);
         if (result == SENSOR_OK) {
-            snapshot.latitude_deg = gps.latitude_deg;
-            snapshot.longitude_deg = gps.longitude_deg;
-            snapshot.altitude_m = gps.altitude_m;
-            snapshot.satellites = gps.satellites;
             snapshot.gps_utc_hour = gps.utc_hour;
             snapshot.gps_utc_minute = gps.utc_minute;
             snapshot.gps_utc_second = gps.utc_second;
@@ -123,11 +123,19 @@ static void gps_thread(void *p1, void *p2, void *p3)
             snapshot.gps_utc_valid = gps.utc_valid;
             snapshot.gps_timestamp_ms = gps.timestamp_ms;
             if (gps.fix_valid) {
+                snapshot.latitude_deg = gps.latitude_deg;
+                snapshot.longitude_deg = gps.longitude_deg;
+                snapshot.altitude_m = gps.altitude_m;
+                snapshot.satellites = gps.satellites;
                 snapshot.flags &= ~TELEMETRY_FLAG_GPS_INVALID;
             } else {
+                snapshot.satellites = 0U;
                 snapshot.flags |= TELEMETRY_FLAG_GPS_INVALID;
             }
         } else {
+            snapshot.gps_fix = false;
+            snapshot.gps_utc_valid = false;
+            snapshot.satellites = 0U;
             snapshot.flags |= TELEMETRY_FLAG_GPS_INVALID;
         }
         k_mutex_unlock(&snapshot_mutex);
@@ -241,6 +249,13 @@ static void output_thread(void *p1, void *p2, void *p3)
 
     while (true) {
         struct telemetry_snapshot local_snapshot;
+        static enum app_mode last_output_mode = APP_MODE_TEST;
+        static bool output_mode_initialized;
+        static bool stats_baseline_initialized;
+        static uint32_t last_stats_window_end_ms;
+        static char report[CONFIG_APP_REPORT_BUFFER_SIZE];
+        bool include_statistics = false;
+        int report_length = 0;
 
         (void)k_timer_status_sync(&output_timer);
         k_mutex_lock(&snapshot_mutex, K_FOREVER);
@@ -256,6 +271,46 @@ static void output_thread(void *p1, void *p2, void *p3)
         enum tracker_state state = local_snapshot.state;
         atomic_set(&active_led,
                    mode_manager_led_for(mode, state));
+
+        if (!output_mode_initialized || mode != last_output_mode) {
+            output_mode_initialized = true;
+            last_output_mode = mode;
+            stats_baseline_initialized = mode == APP_MODE_NORMAL;
+            last_stats_window_end_ms = local_snapshot.statistics.window_end_ms;
+        }
+
+        if (mode == APP_MODE_SIMU) {
+            char frame[SIMU_FRAME_BUFFER_SIZE];
+
+            if (simu_format_frame(&local_snapshot, simu_sequence, frame) == 0) {
+                printk("%s", frame);
+                simu_sequence++;
+            }
+        } else if (mode == APP_MODE_TEST) {
+            report_length = output_format_test_report(
+                &local_snapshot, report, sizeof(report));
+        } else if (mode == APP_MODE_NORMAL) {
+            if (local_snapshot.statistics.valid &&
+                stats_baseline_initialized &&
+                local_snapshot.statistics.window_end_ms !=
+                    last_stats_window_end_ms) {
+                include_statistics = true;
+                last_stats_window_end_ms =
+                    local_snapshot.statistics.window_end_ms;
+            }
+            report_length = output_format_normal_report(
+                &local_snapshot, include_statistics,
+                report, sizeof(report));
+#if CONFIG_APP_ENABLE_ADVANCED_MODE
+        } else if (mode == APP_MODE_ADVANCED) {
+            report_length = output_format_normal_report(
+                &local_snapshot, false, report, sizeof(report));
+#endif
+        }
+
+        if (report_length > 0) {
+            printk("%s", report);
+        }
         ARG_UNUSED(local_snapshot);
         ARG_UNUSED(mode);
     }
@@ -313,6 +368,7 @@ int main(void)
     atomic_set(&active_led,
                mode_manager_led_for(mode_manager.mode, TRACKER_STATE_IDLE));
     snapshot.state = TRACKER_STATE_IDLE;
+    snapshot.flags = TELEMETRY_FLAG_YAW_UNRELIABLE;
     k_timer_start(&output_timer,
                   K_MSEC(mode_manager_period_ms(mode_manager.mode)),
                   K_MSEC(mode_manager_period_ms(mode_manager.mode)));

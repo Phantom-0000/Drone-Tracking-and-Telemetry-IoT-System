@@ -9,6 +9,8 @@ target_sources(app PRIVATE
     src/sensor_contract.c
     src/processing.c
     src/mode_manager.c
+    src/simu_protocol.c
+    src/output_formatter.c
 )
 
 target_include_directories(app PRIVATE include)
