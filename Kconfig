@@ -54,50 +54,97 @@ config APP_ENABLE_ADVANCED_MODE
 
 config APP_USE_MOCK_SENSORS
     bool "Use deterministic mock sensor data"
-    default y
+    default n
     help
       Keep the application testable before the hardware is connected. Set to
       n when the real sensor backends are ready.
 
 config APP_LDR_DARK_RAW
     int "LDR dark calibration ADC value"
-    default 100
+    default 150
     range 0 65535
 
 config APP_LDR_MAX_RAW
     int "LDR maximum-light calibration ADC value"
-    default 900
+    default 3600
     range 1 65535
+
+config APP_IMU_CALIBRATION_MS
+    int "Start-up IMU still-calibration window in milliseconds"
+    default 2000
+    range 0 10000
+    help
+      The board must be still and level for this long after boot. The mean
+      gyroscope output is used as the gyro bias and the mean |a| as the
+      gravity reference of the state detector and gravity compensation.
+      Movement or tilt restarts the window; after five windows the calibration
+      gives up and uses zero bias and 9.80665 m/s2. FLAGS bit 5 is set while
+      pending. 0 disables the calibration.
+
+# Tracker state thresholds. These defaults are the single source of truth
+# (do not override them in prj.conf). They assume the start-up calibration
+# above (bias-free gyro, measured gravity) and the MPU6050 10 Hz DLPF, and
+# must be confirmed with a still/moving capture on the real hardware.
 
 config APP_IDLE_ACCEL_TOLERANCE_MILLI_MPS2
     int "IDLE acceleration tolerance in milli-m/s2"
-    default 300
+    default 400
     range 1 10000
+    help
+      Maximum | |a| - g_cal | for the tracker to be considered stationary.
 
 config APP_IDLE_GYRO_THRESHOLD_DPS
     int "IDLE gyro magnitude threshold in deg/s"
-    default 5
+    default 4
     range 1 360
+    help
+      Maximum bias-corrected angular velocity magnitude for IDLE.
 
 config APP_FLYING_ACCEL_THRESHOLD_MILLI_MPS2
     int "FLYING dynamic acceleration threshold in milli-m/s2"
-    default 800
+    default 1000
     range 1 10000
+    help
+      Minimum | |a| - g_cal | indicating motion. Must exceed the IDLE
+      tolerance; the band in between holds the current state (hysteresis).
 
 config APP_FLYING_GYRO_THRESHOLD_DPS
     int "FLYING gyro magnitude threshold in deg/s"
-    default 15
+    default 10
     range 1 360
+    help
+      Minimum bias-corrected angular velocity magnitude indicating motion.
+      Must exceed the IDLE gyro threshold.
+
+config APP_FLYING_TILT_DEG
+    int "FLYING tilt threshold in degrees"
+    default 15
+    range 1 89
+    help
+      Tilt of the sensor Z axis from vertical (sensor mounted Z-up). A
+      multirotor tilts to produce horizontal thrust, so a sustained tilt
+      above this value is treated as flight even if |a| stays close to g.
+
+config APP_PROBLEM_TILT_DEG
+    int "PROBLEM tilt threshold in degrees"
+    default 60
+    range 2 180
+    help
+      Tilt above this value (including an inverted tracker) is treated as a
+      tip-over / crash-like event: PROBLEM state and FLAGS bit 4 once it has
+      persisted for APP_PROBLEM_PERSISTENCE_MS.
 
 config APP_IDLE_PERSISTENCE_MS
     int "IDLE persistence time in milliseconds"
-    default 1000
+    default 500
     range 0 60000
 
 config APP_FLYING_PERSISTENCE_MS
     int "FLYING persistence time in milliseconds"
-    default 500
+    default 300
     range 0 60000
+    help
+      Long enough (about 8 IMU samples) to reject a single tap or bump.
 
 config APP_PROBLEM_PERSISTENCE_MS
     int "PROBLEM persistence time in milliseconds"

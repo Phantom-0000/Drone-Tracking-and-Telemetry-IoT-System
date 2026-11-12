@@ -4,8 +4,6 @@ build/
 .zephyr/
 .vscode/
 documents/
-extracted_internal.txt
-extract_internal.py
 *.elf
 *.hex
 *.bin

@@ -37,12 +37,38 @@ struct position_state {
 
 struct statistics_state {
     uint32_t window_start_ms;
-    uint32_t complete_samples;
     uint32_t valid_counts[5];
     float sums[5];
     float minima[5];
     float maxima[5];
+    /* Last sensor sample sequence numbers already accumulated. */
+    uint32_t last_light_seq;
+    uint32_t last_environment_seq;
     bool initialized;
+};
+
+/*
+ * Start-up IMU calibration. While the board is still, the gyroscope bias and
+ * the measured gravity magnitude are averaged. Attitude and inertial position
+ * are not integrated until the calibration finishes (FLAGS bit 5 is set).
+ */
+struct imu_calibration {
+    uint32_t duration_ms;
+    uint32_t first_start_ms;
+    uint32_t window_start_ms;
+    uint32_t samples;
+    float sum_gx;
+    float sum_gy;
+    float sum_gz;
+    float sum_accel_magnitude;
+    float min_accel_magnitude;
+    float max_accel_magnitude;
+    float gyro_bias_x_dps;
+    float gyro_bias_y_dps;
+    float gyro_bias_z_dps;
+    float gravity_mps2;
+    bool active;
+    bool done;
 };
 
 struct state_detector_config {
@@ -50,9 +76,14 @@ struct state_detector_config {
     float idle_gyro_threshold_dps;
     float flying_acceleration_threshold_mps2;
     float flying_gyro_threshold_dps;
+    /* Tilt from the Z-up mounting: FLYING above the first, PROBLEM above the second. */
+    float flying_tilt_deg;
+    float problem_tilt_deg;
     uint32_t idle_persistence_ms;
     uint32_t flying_persistence_ms;
     uint32_t problem_persistence_ms;
+    /* Start-up still-calibration window; 0 disables the calibration. */
+    uint32_t imu_calibration_ms;
 };
 
 struct state_detector {
@@ -68,6 +99,9 @@ struct processing_engine {
     struct statistics_state statistics;
     struct state_detector detector;
     struct state_detector_config detector_config;
+    struct imu_calibration calibration;
+    float cos_flying_tilt;
+    float cos_problem_tilt;
 };
 
 void processing_engine_init(struct processing_engine *engine,

@@ -84,7 +84,7 @@ def validate_frame(raw: bytes) -> tuple[list[str], int | None, int | None]:
     checks = [
         (values[0], r"\d{5}", "SEQ"),
         (values[1], r"\d{10}", "TMS"),
-        (values[2], r"[01]", "GF"),
+        (values[2], r"[012]", "GF"),
         (values[3], r"\d{2}", "SAT"),
         (values[4], r"[+-]\d{2}\.\d{6}", "LAT"),
         (values[5], r"[+-]\d{3}\.\d{6}", "LON"),
@@ -120,7 +120,7 @@ def validate_frame(raw: bytes) -> tuple[list[str], int | None, int | None]:
 
     try:
         flags = int(values[26], 16)
-        gps_fix = values[2] == "1"
+        gps_fix = values[2] in ("1", "2")
         satellites = int(values[3])
         if flags & 0xFF00:
             errors.append("FLAGS uses a reserved bit")

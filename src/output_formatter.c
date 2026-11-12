@@ -164,27 +164,56 @@ static int append_statistics(char *output, size_t *used, size_t capacity,
 
     TEXT("STATISTICS: window_end=");
     UINT(statistics->window_end_ms, 10U);
-    TEXT(" samples=");
-    UINT(statistics->valid_samples, 10U);
-    TEXT(" valid=");
-    UINT(statistics->valid ? 1U : 0U, 1U);
+    TEXT(" imu_samples=");
+    UINT(statistics->imu_samples, 5U);
+    TEXT(" light_samples=");
+    UINT(statistics->light_samples, 5U);
+    TEXT(" env_samples=");
+    UINT(statistics->environment_samples, 5U);
     TEXT("\r\n");
 
-    TEXT("STAT LIGHT: mean="); FIXED(statistics->light_mean, false, 3U, 1U);
-    TEXT(" min="); FIXED(statistics->light_min, false, 3U, 1U);
-    TEXT(" max="); FIXED(statistics->light_max, false, 3U, 1U); TEXT("\r\n");
-    TEXT("STAT TEMP: mean="); FIXED(statistics->temperature_mean, true, 3U, 1U);
-    TEXT(" min="); FIXED(statistics->temperature_min, true, 3U, 1U);
-    TEXT(" max="); FIXED(statistics->temperature_max, true, 3U, 1U); TEXT("\r\n");
-    TEXT("STAT HUM: mean="); FIXED(statistics->humidity_mean, false, 3U, 1U);
-    TEXT(" min="); FIXED(statistics->humidity_min, false, 3U, 1U);
-    TEXT(" max="); FIXED(statistics->humidity_max, false, 3U, 1U); TEXT("\r\n");
-    TEXT("STAT ACCEL: mean="); FIXED(statistics->acceleration_mean, true, 3U, 2U);
-    TEXT(" min="); FIXED(statistics->acceleration_min, true, 3U, 2U);
-    TEXT(" max="); FIXED(statistics->acceleration_max, true, 3U, 2U); TEXT("\r\n");
-    TEXT("STAT GYRO: mean="); FIXED(statistics->angular_velocity_mean, true, 4U, 1U);
-    TEXT(" min="); FIXED(statistics->angular_velocity_min, true, 4U, 1U);
-    TEXT(" max="); FIXED(statistics->angular_velocity_max, true, 4U, 1U); TEXT("\r\n");
+    /* A channel without valid samples in the window is reported as N/A. */
+    TEXT("STAT LIGHT: ");
+    if (statistics->light_samples == 0U) {
+        TEXT("N/A");
+    } else {
+        TEXT("mean="); FIXED(statistics->light_mean, false, 3U, 1U);
+        TEXT(" min="); FIXED(statistics->light_min, false, 3U, 1U);
+        TEXT(" max="); FIXED(statistics->light_max, false, 3U, 1U);
+    }
+    TEXT("\r\nSTAT TEMP: ");
+    if (statistics->environment_samples == 0U) {
+        TEXT("N/A");
+    } else {
+        TEXT("mean="); FIXED(statistics->temperature_mean, true, 3U, 1U);
+        TEXT(" min="); FIXED(statistics->temperature_min, true, 3U, 1U);
+        TEXT(" max="); FIXED(statistics->temperature_max, true, 3U, 1U);
+    }
+    TEXT("\r\nSTAT HUM: ");
+    if (statistics->environment_samples == 0U) {
+        TEXT("N/A");
+    } else {
+        TEXT("mean="); FIXED(statistics->humidity_mean, false, 3U, 1U);
+        TEXT(" min="); FIXED(statistics->humidity_min, false, 3U, 1U);
+        TEXT(" max="); FIXED(statistics->humidity_max, false, 3U, 1U);
+    }
+    TEXT("\r\nSTAT ACCEL: ");
+    if (statistics->imu_samples == 0U) {
+        TEXT("N/A");
+    } else {
+        TEXT("mean="); FIXED(statistics->acceleration_mean, true, 3U, 2U);
+        TEXT(" min="); FIXED(statistics->acceleration_min, true, 3U, 2U);
+        TEXT(" max="); FIXED(statistics->acceleration_max, true, 3U, 2U);
+    }
+    TEXT("\r\nSTAT GYRO: ");
+    if (statistics->imu_samples == 0U) {
+        TEXT("N/A");
+    } else {
+        TEXT("mean="); FIXED(statistics->angular_velocity_mean, true, 4U, 1U);
+        TEXT(" min="); FIXED(statistics->angular_velocity_min, true, 4U, 1U);
+        TEXT(" max="); FIXED(statistics->angular_velocity_max, true, 4U, 1U);
+    }
+    TEXT("\r\n");
 
 #undef FIXED
 #undef UINT
@@ -262,6 +291,22 @@ static int format_report(const struct telemetry_snapshot *snapshot,
     if (rc == 0) {
         rc = append_hex16(output, &used, capacity, snapshot->flags);
     }
+    TEXT("\r\nDIAGNOSTICS: imu=");
+    TEXT((snapshot->flags & TELEMETRY_FLAG_IMU_INVALID) ? "INVALID" : "OK");
+    TEXT(" gps=");
+    TEXT((snapshot->flags & TELEMETRY_FLAG_GPS_INVALID) ? "NO_FIX_OR_INVALID" : "OK");
+    TEXT(" ldr=");
+    if (snapshot->ldr_hardware_fault) {
+        TEXT("FAULT");
+    } else {
+        TEXT((snapshot->flags & TELEMETRY_FLAG_LDR_INVALID) ? "INVALID" : "OK");
+    }
+    TEXT(" si7021=");
+    TEXT((snapshot->flags & TELEMETRY_FLAG_SI7021_INVALID) ? "INVALID" : "OK");
+    TEXT(" utc=");
+    TEXT(snapshot->gps_utc_valid ? "VALID" : "INVALID");
+    TEXT(" imu_cal=");
+    TEXT((snapshot->flags & TELEMETRY_FLAG_CALIBRATION_PENDING) ? "PENDING" : "DONE");
     TEXT("\r\n");
 
     if (rc == 0 && include_statistics && snapshot->statistics.valid) {

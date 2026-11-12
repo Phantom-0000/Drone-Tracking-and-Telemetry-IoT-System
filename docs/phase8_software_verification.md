@@ -8,7 +8,6 @@ sensors are available.
 - Default, no-mock, and ADVANCED Zephyr configurations configure and link for
   `nucleo_wl55jc`.
 - ROM and RAM footprint reports are generated successfully.
-- Required compatibility symbols remain in the final ELF.
 - The SIMU checker accepts valid fixed-width frames and rejects malformed
   length, checksum, state, reserved FLAGS, and GPS fallback cases.
 - A synthetic 100-frame stream at 100 ms intervals is accepted.
@@ -23,9 +22,8 @@ The software audit on 28 October 2026 produced these build results:
 | Real-sensor path (`APP_USE_MOCK_SENSORS=n`) | 165/165 steps | 51,004 B (19.46%) | 17,552 B (26.78%) |
 | ADVANCED mode | 165/165 steps | 55,856 B (21.31%) | 17,552 B (26.78%) |
 
-The final default ELF retained `config_mandatory_printf`,
-`print_alarm_messages`, `print_academic_integrity_marker`,
-`simu_format_frame`, `simu_checksum`, and the processing entry points.
+The final default ELF retained `simu_format_frame`, `simu_checksum`, and the
+processing entry points.
 The host checks covered all three padded tracker states, GPS no-fix fallback,
 bad length, bad checksum, reserved FLAGS, and 100 frames at 100 ms spacing.
 

@@ -79,7 +79,14 @@ struct imu_event {
 
 struct telemetry_statistics {
     uint32_t window_end_ms;
-    uint32_t valid_samples;
+    /*
+     * Per-channel sample counts for the completed window. A channel with a
+     * zero count has no valid data in the window and its mean/min/max are
+     * meaningless; the other channels are still reported.
+     */
+    uint32_t imu_samples;
+    uint32_t light_samples;
+    uint32_t environment_samples;
     float light_mean;
     float light_min;
     float light_max;
@@ -126,6 +133,15 @@ struct telemetry_snapshot {
     float light_percent;
     float temperature_c;
     float humidity_percent;
+    /* Incremented on every fresh measurement; used by the 30 s statistics. */
+    uint32_t light_sample_seq;
+    uint32_t environment_sample_seq;
+    /*
+     * Persistent LDR ADC failure or open/shorted divider rail (0 / 4095).
+     * Unlike an out-of-calibration reading (FLAGS bit 2 only), this is a
+     * device fault and counts towards the PROBLEM state.
+     */
+    bool ldr_hardware_fault;
 
     bool local_origin_valid;
     float x_m;

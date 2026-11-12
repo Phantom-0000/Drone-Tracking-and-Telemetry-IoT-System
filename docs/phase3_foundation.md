@@ -1,6 +1,6 @@
 # Phase 3 Application Foundation
 
-The Phase 3 skeleton establishes the Zephyr application boundary without pretending that the physical sensor wiring is already known. It provides the build entry point, application Kconfig, a board-independent Device Tree application node, the mandatory thread layout, static synchronization objects, the IMU event queue, output timer, and compatibility hooks.
+The Phase 3 skeleton establishes the Zephyr application boundary without pretending that the physical sensor wiring is already known. It provides the build entry point, application Kconfig, a board-independent Device Tree application node, the mandatory thread layout, static synchronization objects, the IMU event queue, and the output timer.
 
 ## Current foundation
 
@@ -9,7 +9,6 @@ The Phase 3 skeleton establishes the Zephyr application boundary without pretend
 - `prj.conf` enables the kernel capabilities required by the foundation.
 - `app.overlay` defines the application timing node without inventing board-specific pins or sensor addresses.
 - `src/main.c` creates acquisition, processing, output, and mode threads, a static IMU queue, a snapshot mutex, a mode semaphore, and a periodic output timer.
-- `src/compatibility_hooks.c` provides the required return values and exact compatibility strings. These functions are not called by the runtime SIMU path.
 
 ## Deliberately deferred
 
@@ -17,5 +16,5 @@ Physical pin mapping, I2C addresses, UART routing, ADC channel, RGB LED polarity
 
 ## Phase 3 exit criteria
 
-The application is ready for a Zephyr toolchain build once a target board and the Phase 4 hardware configuration are selected. The required compatibility symbols exist, the task and synchronization structure is present, and the hardware-specific bindings are isolated in the Device Tree/application configuration boundary.
+The application is ready for a Zephyr toolchain build once a target board and the Phase 4 hardware configuration are selected. The task and synchronization structure is present, and the hardware-specific bindings are isolated in the Device Tree/application configuration boundary.
 

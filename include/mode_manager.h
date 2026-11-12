@@ -36,7 +36,7 @@ struct mode_manager {
 void mode_manager_init(struct mode_manager *manager,
                        uint32_t button_debounce_ms);
 
-/* Bridge for the eventual B1 GPIO callback. */
+/* Called by the B1 GPIO interrupt callback; queues the press timestamp. */
 void app_b1_button_pressed(uint32_t timestamp_ms);
 
 /* Returns true only when the press is outside the debounce interval. */

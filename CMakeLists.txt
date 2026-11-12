@@ -5,7 +5,6 @@ project(drone_telemetry)
 
 target_sources(app PRIVATE
     src/main.c
-    src/compatibility_hooks.c
     src/sensor_contract.c
     src/processing.c
     src/mode_manager.c
