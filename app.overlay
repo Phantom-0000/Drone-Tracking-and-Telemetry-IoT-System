@@ -1,10 +1,17 @@
 /*
- * Board-independent application configuration.
+ * NUCLEO-WL55JC1 hardware overlay for the Drone Tracking and Telemetry system.
  *
- * Physical pin assignments, sensor addresses, UART routing, ADC channel,
- * LED polarity, and B1 GPIO are intentionally deferred until the hardware
- * wiring is frozen during sensor integration.
+ * Pin mapping:
+ * - I2C1 (MPU6050 @ 0x68, Si7021 @ 0x40): SCL = PB8 (CN10-27), SDA = PB9 (CN10-26)
+ * - USART1 (GPS PA6H @ 9600 8N1): TX = PB6 (CN10-35), RX = PB7 (CN10-37)
+ * - ADC1 IN5 (LDR divider): PB1 / A0 (CN7-28)
+ * - RGB LED (Common Cathode, ACTIVE_HIGH): R = PB11 (CN10-30), G = PB10 (CN10-25), B = PB15 (CN10-28)
+ * - B1 mode button (sw0): PA0
  */
+
+#include <zephyr/dt-bindings/adc/adc.h>
+#include <zephyr/dt-bindings/gpio/gpio.h>
+#include <zephyr/dt-bindings/i2c/i2c.h>
 
 / {
     telemetry_app: telemetry_app {
@@ -13,5 +20,50 @@
         gps-update-period-ms = <1000>;
         environment-period-ms = <2000>;
         simu-period-ms = <100>;
+    };
+
+    zephyr,user {
+        io-channels = <&adc1 5>;
+    };
+};
+
+&green_led_2 {
+    gpios = <&gpiob 10 GPIO_ACTIVE_HIGH>;
+};
+
+&pwm2 {
+    status = "disabled";
+};
+
+&i2c1 {
+    pinctrl-0 = <&i2c1_scl_pb8 &i2c1_sda_pb9>;
+    pinctrl-names = "default";
+    clock-frequency = <I2C_BITRATE_STANDARD>;
+    status = "okay";
+};
+
+&usart1 {
+    pinctrl-0 = <&usart1_tx_pb6 &usart1_rx_pb7>;
+    pinctrl-names = "default";
+    current-speed = <9600>;
+    status = "okay";
+};
+
+&adc1 {
+    #address-cells = <1>;
+    #size-cells = <0>;
+    status = "okay";
+
+    channel@5 {
+        reg = <5>;
+        zephyr,gain = "ADC_GAIN_1";
+        zephyr,reference = "ADC_REF_INTERNAL";
+        /*
+         * Longest sampling time (160.5 ADC cycles). ADC_ACQ_TIME_DEFAULT maps to
+         * the shortest one (1.5 cycles), too short to charge the sampling
+         * capacitor through the kilo-ohm output impedance of the LDR divider.
+         */
+        zephyr,acquisition-time = <ADC_ACQ_TIME_MAX>;
+        zephyr,resolution = <12>;
     };
 };

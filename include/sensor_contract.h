@@ -38,6 +38,15 @@ enum sensor_result si7021_convert_raw(const struct si7021_raw_sample *raw,
                                       uint32_t timestamp_ms,
                                       struct environment_sample *out);
 
+/*
+ * Map a raw LDR ADC sample to 0.0-100.0 %.
+ * SENSOR_OK:       inside the calibrated [dark_raw, maximum_raw] range.
+ * SENSOR_OVERFLOW: outside the calibrated range (1..dark_raw-1 or
+ *                  maximum_raw+1..4094); *light_percent holds the clamped
+ *                  0 % or 100 % value and the caller sets FLAGS bit 2.
+ * SENSOR_INVALID:  invalid arguments/calibration or ADC rail (0 / >=4095,
+ *                  indicating an open or shorted divider; no value produced).
+ */
 enum sensor_result ldr_map_percent(uint16_t adc_raw,
                                    uint32_t timestamp_ms,
                                    const struct ldr_calibration *calibration,
@@ -54,5 +63,14 @@ enum sensor_result sensor_mock_read_environment(uint32_t timestamp_ms,
                                                 struct environment_sample *out);
 enum sensor_result sensor_mock_read_ldr(uint32_t timestamp_ms,
                                         struct ldr_sample *out);
+
+enum sensor_result sensor_hw_read_imu(uint32_t timestamp_ms,
+                                      struct imu_sample *out);
+enum sensor_result sensor_hw_read_gps(uint32_t timestamp_ms,
+                                      struct gps_sample *out);
+enum sensor_result sensor_hw_read_environment(uint32_t timestamp_ms,
+                                              struct environment_sample *out);
+enum sensor_result sensor_hw_read_ldr(uint32_t timestamp_ms,
+                                      struct ldr_sample *out);
 
 #endif /* SENSOR_CONTRACT_H */
