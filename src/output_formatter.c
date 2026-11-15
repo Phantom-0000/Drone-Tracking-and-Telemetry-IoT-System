@@ -1,3 +1,9 @@
+/*
+ * Human-readable telemetry formatters for TEST mode (every 2 s) and
+ * NORMAL mode (every 5 s, plus completed 30 s statistics windows).
+ * Uses bounded fixed-point ASCII conversion with zero dynamic allocation.
+ */
+
 #include "output_formatter.h"
 
 #include <errno.h>
@@ -5,6 +11,7 @@
 #include <stdint.h>
 #include <string.h>
 
+/* Append raw character slice into the caller-supplied report buffer. */
 static int append_bytes(char *output, size_t *used, size_t capacity,
                         const char *bytes, size_t length)
 {
@@ -137,6 +144,7 @@ static const char *state_text(enum tracker_state state)
     }
 }
 
+/* Append the 30-second mean/min/max statistics summary in NORMAL mode (NM4). */
 static int append_statistics(char *output, size_t *used, size_t capacity,
                              const struct telemetry_statistics *statistics)
 {
@@ -221,6 +229,7 @@ static int append_statistics(char *output, size_t *used, size_t capacity,
     return rc;
 }
 
+/* Shared human-readable multi-line report builder for TEST and NORMAL modes. */
 static int format_report(const struct telemetry_snapshot *snapshot,
                          const char *mode, bool include_statistics,
                          char *output, size_t capacity)

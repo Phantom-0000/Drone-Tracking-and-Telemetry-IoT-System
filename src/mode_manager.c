@@ -1,11 +1,18 @@
+/*
+ * Operating mode transitions, wrap-safe B1 button software debouncing,
+ * output scheduling periods, and mode/state RGB LED mapping.
+ */
+
 #include "mode_manager.h"
 
+/* Unsigned subtraction handles 32-bit k_uptime_get_32() wrap-around safely. */
 static bool elapsed_at_least(uint32_t now_ms, uint32_t then_ms,
                              uint32_t interval_ms)
 {
     return (uint32_t)(now_ms - then_ms) >= interval_ms;
 }
 
+/* System always starts in TEST mode upon reset (Section 2.3). */
 void mode_manager_init(struct mode_manager *manager,
                        uint32_t button_debounce_ms)
 {
@@ -15,6 +22,7 @@ void mode_manager_init(struct mode_manager *manager,
     manager->button_timestamp_valid = false;
 }
 
+/* Reject mechanical contact bounce within button_debounce_ms of last valid press. */
 bool mode_manager_accept_button(struct mode_manager *manager,
                                 uint32_t timestamp_ms)
 {
@@ -29,6 +37,7 @@ bool mode_manager_accept_button(struct mode_manager *manager,
     return true;
 }
 
+/* Advance circularly: TEST -> NORMAL -> SIMU (-> ADVANCED if enabled) -> TEST. */
 enum app_mode mode_manager_next_mode(enum app_mode mode)
 {
     switch (mode) {
@@ -51,6 +60,7 @@ enum app_mode mode_manager_next_mode(enum app_mode mode)
     }
 }
 
+/* Return VCOM output period for the active mode (2000 / 5000 / 100 ms). */
 uint32_t mode_manager_period_ms(enum app_mode mode)
 {
     switch (mode) {
@@ -69,6 +79,12 @@ uint32_t mode_manager_period_ms(enum app_mode mode)
     }
 }
 
+/*
+ * Map active mode and tracker state to RGB status LED color:
+ *  - TEST:   Blue (TM4)
+ *  - NORMAL: Green = IDLE, Yellow = FLYING, Red = PROBLEM (NM6)
+ *  - SIMU:   Magenta regardless of tracker state (SM7)
+ */
 enum app_led_color mode_manager_led_for(enum app_mode mode,
                                         enum tracker_state state)
 {

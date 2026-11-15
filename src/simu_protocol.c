@@ -1,3 +1,10 @@
+/*
+ * Deterministic fixed-width SIMU frame serializer (Section 2.4).
+ * Uses custom integer/fixed-point ASCII helpers instead of printf("%f") to
+ * guarantee exact field widths, sign characters, NaN/Inf safety, and bounded
+ * stack usage on Cortex-M4 without C-library float formatting overhead.
+ */
+
 #include "simu_protocol.h"
 
 #include <errno.h>
@@ -7,6 +14,7 @@
 
 #define FLAG_GPS_INVALID TELEMETRY_FLAG_GPS_INVALID
 
+/* Return 10^decimals for fixed-point scaling. */
 static uint32_t decimal_scale(unsigned int decimals)
 {
     uint32_t scale = 1U;
@@ -17,6 +25,7 @@ static uint32_t decimal_scale(unsigned int decimals)
     return scale;
 }
 
+/* Append raw bytes into output buffer with strict bounds checking. */
 static int append_bytes(char *output, size_t *used, size_t capacity,
                         const char *bytes, size_t length)
 {
@@ -35,6 +44,7 @@ static int append_literal(char *output, size_t *used, size_t capacity,
     return append_bytes(output, used, capacity, literal, strlen(literal));
 }
 
+/* Format zero-padded unsigned integer of exact width (e.g. SEQ, TMS, GF, SAT). */
 static int append_uint(char *output, size_t *used, size_t capacity,
                        uint32_t value, unsigned int width)
 {
@@ -56,6 +66,7 @@ static int append_uint(char *output, size_t *used, size_t capacity,
     return append_bytes(output, used, capacity, field, width);
 }
 
+/* Format 16-bit status bitmask as 4 uppercase hex digits (FLAGS). */
 static int append_hex16(char *output, size_t *used, size_t capacity,
                         uint16_t value)
 {
@@ -70,6 +81,12 @@ static int append_hex16(char *output, size_t *used, size_t capacity,
     return append_bytes(output, used, capacity, field, sizeof(field));
 }
 
+/*
+ * Format signed or unsigned fixed-point number with mandatory '+'/'-' sign,
+ * zero-padded integer digits, '.' separator, and rounded fractional digits.
+ * Out-of-range values saturate to the maximum representable fixed-width value;
+ * non-finite values (NaN/Inf) fall back safely to zero.
+ */
 static int append_fixed(char *output, size_t *used, size_t capacity,
                         double value, bool signed_value,
                         unsigned int integer_digits,
@@ -133,6 +150,7 @@ static int append_fixed(char *output, size_t *used, size_t capacity,
     return append_bytes(output, used, capacity, field, width);
 }
 
+/* Pad tracker state to the mandatory 8-character SIMU field width (Table 4). */
 static const char *state_text(enum tracker_state state)
 {
     switch (state) {
@@ -147,6 +165,7 @@ static const char *state_text(enum tracker_state state)
     }
 }
 
+/* 8-bit XOR checksum of all ASCII characters strictly between '$' and '*'. */
 uint8_t simu_checksum(const char *begin, size_t length)
 {
     uint8_t checksum = 0U;
@@ -157,6 +176,11 @@ uint8_t simu_checksum(const char *begin, size_t length)
     return checksum;
 }
 
+/*
+ * Assemble one complete 221-byte SIMU frame:
+ * $SIMU1,SEQ,TMS,GF,SAT,LAT,LON,ALT,X,Y,Z,VX,VY,VZ,ROLL,PITCH,YAW,
+ * AX,AY,AZ,GX,GY,GZ,LIGHT,TEMP,HUM,STATE,FLAGS*CS\r\n
+ */
 int simu_format_frame(const struct telemetry_snapshot *snapshot,
                       uint16_t sequence,
                       char output[SIMU_FRAME_BUFFER_SIZE])
@@ -172,6 +196,7 @@ int simu_format_frame(const struct telemetry_snapshot *snapshot,
         return -EINVAL;
     }
 
+    /* Reserved bits 8..15 must remain zero; enforce GF=0, SAT=00 on no-fix. */
     flags = snapshot->flags & 0x00FFU;
     gps_valid = snapshot->gps_fix &&
                 (snapshot->flags & FLAG_GPS_INVALID) == 0U;
@@ -184,6 +209,7 @@ int simu_format_frame(const struct telemetry_snapshot *snapshot,
         satellites = 99U;
     }
 
+    /* Header, 5-digit sequence, 10-digit uptime ms, GPS fix & satellite count. */
     rc = append_literal(output, &used, SIMU_FRAME_BUFFER_SIZE, "$SIMU1,");
     if (rc == 0) rc = append_uint(output, &used, SIMU_FRAME_BUFFER_SIZE,
                                   sequence, 5U);

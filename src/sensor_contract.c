@@ -1,3 +1,11 @@
+/*
+ * Register-level sensor drivers, NMEA GGA parser, and physical unit conversions:
+ *  - MPU6050 6-axis IMU on I2C1 (0x68): +/-2 g accel, +/-250 dps gyro, 10 Hz DLPF
+ *  - Si7021 Temp/RH sensor on I2C1 (0x40): No-Hold Master RH (0xF5) + Temp (0xE0)
+ *  - PA6H GPS module on USART1 (9600 8N1): interrupt RX + $GPGGA/$GNGGA parser
+ *  - LDR divider on ADC1_IN5 (PB1): 12-bit internal reference, 0..100 % mapping
+ */
+
 #include "sensor_contract.h"
 
 #include <errno.h>
@@ -26,6 +34,11 @@ static float clamp_float(float value, float minimum, float maximum)
     return value;
 }
 
+/*
+ * Convert raw 16-bit signed MPU6050 counts to m/s^2 and deg/s:
+ *  - AFS_SEL = 0 (+/-2 g):   a [m/s^2] = (raw / 16384) * 9.80665
+ *  - FS_SEL  = 0 (+/-250 dps): w [deg/s] = raw / 131.0
+ */
 enum sensor_result mpu6050_convert_raw(const struct mpu6050_raw_sample *raw,
                                         uint32_t timestamp_ms,
                                         struct imu_sample *out)
@@ -47,6 +60,11 @@ enum sensor_result mpu6050_convert_raw(const struct mpu6050_raw_sample *raw,
     return SENSOR_OK;
 }
 
+/*
+ * Convert raw 16-bit Si7021 words using the Silicon Labs datasheet formulas:
+ *  - T  [C]   = (175.72 * Temp_Code / 65536) - 46.85
+ *  - RH [%RH] = (125.0  * RH_Code   / 65536) - 6.0  (clamped to 0..100 %RH)
+ */
 enum sensor_result si7021_convert_raw(const struct si7021_raw_sample *raw,
                                       uint32_t timestamp_ms,
                                       struct environment_sample *out)
@@ -149,6 +167,7 @@ static int hex_digit_value(char value)
     return -1;
 }
 
+/* Verify NMEA 0183 8-bit XOR checksum between '$' and '*' delimiters. */
 static bool nmea_checksum_valid(const char *line, const char *checksum_marker)
 {
     unsigned int checksum = 0U;
@@ -212,6 +231,7 @@ static bool parse_double_strict(const char *text, double *value)
     return true;
 }
 
+/* Convert NMEA ddmm.mmmm (lat) or dddmm.mmmm (lon) + N/S/E/W into signed degrees. */
 static bool parse_nmea_coordinate(const char *value,
                                   const char *hemisphere,
                                   bool latitude,
@@ -247,6 +267,11 @@ static bool parse_nmea_coordinate(const char *value,
     return true;
 }
 
+/*
+ * Parse a checksum-verified $GPGGA or $GNGGA sentence:
+ * Fields: [1]=UTC hhmmss, [2..3]=Lat+N/S, [4..5]=Lon+E/W, [6]=Fix, [7]=Sats, [9]=Alt(m).
+ * When fix quality == 0, UTC time (if present) is still extracted while fix_valid=false.
+ */
 enum sensor_result gps_parse_gga(const char *line, struct gps_sample *out)
 {
     char buffer[160];
@@ -490,6 +515,11 @@ static void gps_send_command(const char *command)
     }
 }
 
+/*
+ * USART1 RX interrupt handler: assembles incoming NMEA bytes line-by-line and
+ * publishes the latest complete $GPGGA/$GNGGA sentence under a spinlock so
+ * gps_thread never busy-waits on the serial line.
+ */
 static void gps_uart_isr(const struct device *dev, void *user_data)
 {
     ARG_UNUSED(user_data);
@@ -539,6 +569,11 @@ static void gps_uart_isr(const struct device *dev, void *user_data)
 }
 #endif
 
+/*
+ * Configure MPU6050 registers on first access (or after a power glitch) and
+ * perform a single 14-byte I2C burst read starting at ACCEL_XOUT_H (0x3B) to
+ * capture coherent 3-axis accelerometer and 3-axis gyroscope measurements.
+ */
 enum sensor_result sensor_hw_read_imu(uint32_t timestamp_ms,
                                       struct imu_sample *out)
 {
@@ -631,6 +666,11 @@ enum sensor_result sensor_hw_read_imu(uint32_t timestamp_ms,
 #endif
 }
 
+/*
+ * Trigger a Si7021 No-Hold Master relative-humidity conversion (0xF5), sleep
+ * 30 ms for completion, read the 16-bit RH word, then read the co-sampled
+ * die temperature via command 0xE0 without starting a second conversion.
+ */
 enum sensor_result sensor_hw_read_environment(uint32_t timestamp_ms,
                                               struct environment_sample *out)
 {
@@ -690,6 +730,7 @@ enum sensor_result sensor_hw_read_environment(uint32_t timestamp_ms,
 #endif
 }
 
+/* Read one 12-bit sample (0..4095) from ADC1_IN5 (PB1 / A0) for the LDR divider. */
 enum sensor_result sensor_hw_read_ldr(uint32_t timestamp_ms,
                                       struct ldr_sample *out)
 {
@@ -737,6 +778,11 @@ enum sensor_result sensor_hw_read_ldr(uint32_t timestamp_ms,
 #endif
 }
 
+/*
+ * Initialize interrupt-driven GPS UART RX on first call, configure the PA6H
+ * for GGA-only output ($PMTK314), parse any unread GGA sentence, and enforce
+ * a 3000 ms staleness timeout if the GPS stream stops arriving.
+ */
 enum sensor_result sensor_hw_read_gps(uint32_t timestamp_ms,
                                       struct gps_sample *out)
 {
@@ -816,6 +862,7 @@ enum sensor_result sensor_hw_read_gps(uint32_t timestamp_ms,
 
 #else /* !__ZEPHYR__ */
 
+/* Host-side stubs used when compiling unit tests outside Zephyr. */
 enum sensor_result sensor_hw_read_imu(uint32_t timestamp_ms,
                                       struct imu_sample *out)
 {

@@ -1,3 +1,10 @@
+/*
+ * Zephyr RTOS application entry point and multi-rate task orchestration for
+ * the STM32WL55JC Drone Tracking and Telemetry Node:
+ *  - Coordinates 6 preemptive threads, bounded static message queues, mutexes,
+ *    interrupt-driven LPUART1 VCOM output, and B1 GPIO button interrupts.
+ *  - Ensures zero busy-wait polling so the idle thread enters low-power WFI.
+ */
 
 #include <zephyr/device.h>
 #include <zephyr/devicetree.h>
@@ -42,6 +49,15 @@ BUILD_ASSERT(CONFIG_APP_PROBLEM_TILT_DEG > CONFIG_APP_FLYING_TILT_DEG,
 /* Consecutive read failures before a sensor is treated as faulty. */
 #define SENSOR_FAULT_STREAK 3U
 
+/*
+ * Static RTOS synchronization primitives (zero heap allocation):
+ *  - imu_event_queue:   delivers 25 Hz IMU sample/fault events to processing
+ *  - mode_button_queue: decouples B1 GPIO ISR from debounced mode transitions
+ *  - snapshot_mutex:    protects coherent reads/writes of the shared snapshot
+ *                       (never held across slow I2C/UART/ADC bus transactions)
+ *  - led_mutex:         keeps the 3 R/G/B GPIO updates of a color atomic
+ *  - output_timer:      drives deterministic 2 s / 5 s / 100 ms VCOM cadence
+ */
 K_MSGQ_DEFINE(imu_event_queue, sizeof(struct imu_event), 8, 4);
 K_MSGQ_DEFINE(mode_button_queue, sizeof(uint32_t), 4, 4);
 K_MUTEX_DEFINE(snapshot_mutex);
@@ -256,6 +272,11 @@ static void publish_imu_fault(enum sensor_result result, uint32_t timestamp_ms)
     }
 }
 
+/*
+ * 25 Hz (40 ms) MPU6050 acquisition task. Performs I2C read outside any
+ * application mutex and posts either a valid sample or a fault event so
+ * processing_thread always advances health and state detection on schedule.
+ */
 static void imu_thread(void *p1, void *p2, void *p3)
 {
     ARG_UNUSED(p1);
@@ -280,6 +301,11 @@ static void imu_thread(void *p1, void *p2, void *p3)
     }
 }
 
+/*
+ * 1 Hz (1000 ms) GPS acquisition task. Parses the latest interrupt-buffered
+ * GGA sentence; on fix loss, retains the last valid coordinates while clearing
+ * satellite count and setting TELEMETRY_FLAG_GPS_INVALID (Section 2.4.9).
+ */
 static void gps_thread(void *p1, void *p2, void *p3)
 {
     ARG_UNUSED(p1);
@@ -324,6 +350,11 @@ static void gps_thread(void *p1, void *p2, void *p3)
     }
 }
 
+/*
+ * 0.5 Hz (2000 ms) environmental acquisition task. Reads Si7021 temperature/RH
+ * and LDR ambient light ADC, distinguishing out-of-calibration light clamping
+ * (FLAGS bit 2 only) from persistent hardware faults (>= 3 consecutive errors).
+ */
 static void environment_thread(void *p1, void *p2, void *p3)
 {
     uint32_t env_fail_streak = 0U;
@@ -401,6 +432,11 @@ static void environment_thread(void *p1, void *p2, void *p3)
     }
 }
 
+/*
+ * Highest-priority worker task (priority 4). Drains imu_event_queue, runs
+ * calibration, attitude/position integration, 30 s statistics, and state
+ * detection under snapshot_mutex, then updates the RGB LED state indicator.
+ */
 static void processing_thread(void *p1, void *p2, void *p3)
 {
     ARG_UNUSED(p1);
@@ -452,6 +488,11 @@ static void processing_thread(void *p1, void *p2, void *p3)
     }
 }
 
+/*
+ * Exclusive owner of the ST-LINK Virtual COM port (GR5 / SM6). Blocks on
+ * output_timer (2 s TEST, 5 s NORMAL, 100 ms SIMU), copies a coherent local
+ * snapshot, and transmits either human-readable reports or 221-byte SIMU frames.
+ */
 static void output_thread(void *p1, void *p2, void *p3)
 {
     ARG_UNUSED(p1);
@@ -569,6 +610,11 @@ static void init_gpio_peripherals(void)
     }
 }
 
+/*
+ * Event-driven mode manager task. Sleeps indefinitely on mode_button_queue
+ * until B1 is pressed, applies 200 ms software debouncing, cycles the active
+ * mode (TEST -> NORMAL -> SIMU -> TEST), and reschedules output_timer.
+ */
 static void mode_thread(void *p1, void *p2, void *p3)
 {
     ARG_UNUSED(p1);
@@ -597,6 +643,15 @@ static void mode_thread(void *p1, void *p2, void *p3)
     }
 }
 
+/*
+ * Static thread definitions (lower number = higher preemptive priority):
+ *  - Prio 4: processing_thread (drains 25 Hz IMU queue immediately)
+ *  - Prio 5: imu_thread        (40 ms inertial sampling cadence)
+ *  - Prio 6: gps_thread        (1000 ms GGA sentence consumption)
+ *  - Prio 7: environment_thread(2000 ms Si7021 + LDR sampling)
+ *  - Prio 8: output_thread     (timer-driven VCOM serialization)
+ *  - Prio 9: mode_thread       (B1 button mode transitions)
+ */
 K_THREAD_DEFINE(imu_thread_id, 1536, imu_thread, NULL, NULL, NULL, 5, 0, 0);
 K_THREAD_DEFINE(gps_thread_id, 1536, gps_thread, NULL, NULL, NULL, 6, 0, 0);
 K_THREAD_DEFINE(environment_thread_id, 1536, environment_thread, NULL, NULL, NULL, 7, 0, 0);
@@ -604,6 +659,11 @@ K_THREAD_DEFINE(processing_thread_id, 2048, processing_thread, NULL, NULL, NULL,
 K_THREAD_DEFINE(output_thread_id, 2048, output_thread, NULL, NULL, NULL, 8, 0, 0);
 K_THREAD_DEFINE(mode_thread_id, 1024, mode_thread, NULL, NULL, NULL, 9, 0, 0);
 
+/*
+ * Runs at priority 0 before worker threads (prio 4..9) are scheduled:
+ * initializes interrupt VCOM TX, RGB LED & B1 GPIOs, initial flags, and
+ * starts output_timer in TEST mode before returning cleanly.
+ */
 int main(void)
 {
     init_vcom_tx();

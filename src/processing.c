@@ -1,8 +1,18 @@
+/*
+ * Telemetry processing pipeline executed on every 25 Hz IMU event:
+ *  1. Start-up stationary calibration (gyroscope zero-rate bias & gravity norm)
+ *  2. Gyroscope numerical attitude integration (roll, pitch, yaw)
+ *  3. Local East-North-Up (ENU) GPS position/velocity or inertial integration
+ *  4. 30-second rolling window statistics (mean, min, max across 5 channels)
+ *  5. Hysteresis + persistence tracker state detector (IDLE / FLYING / PROBLEM)
+ */
+
 #include "processing.h"
 
 #include <math.h>
 #include <string.h>
 
+/* Equirectangular WGS84 local tangent-plane scale factors around mid-latitudes. */
 #define EARTH_METERS_PER_DEGREE_LATITUDE 110540.0
 #define EARTH_METERS_PER_DEGREE_LONGITUDE 111320.0
 #define STATISTICS_WINDOW_MS 30000U
@@ -25,6 +35,7 @@ static float abs_f(float x)
     return x < 0.0f ? -x : x;
 }
 
+/* Euclidean norm sqrt(x^2 + y^2 + z^2) via 12-iteration Newton-Raphson. */
 static float magnitude3(float x, float y, float z)
 {
     float sum = x * x + y * y + z * z;
@@ -41,6 +52,7 @@ static float magnitude3(float x, float y, float z)
     return guess;
 }
 
+/* Compute bounded integration step dt in seconds (clamped to 200 ms on stalls). */
 static float clamp_dt_seconds(uint32_t previous_ms, uint32_t current_ms)
 {
     uint32_t delta_ms;
@@ -55,6 +67,10 @@ static float clamp_dt_seconds(uint32_t previous_ms, uint32_t current_ms)
     return (float)delta_ms / 1000.0f;
 }
 
+/*
+ * Forward Euler integration of bias-corrected gyroscope rates (SR4).
+ * Starts at zero orientation; accumulates slow drift without external reference.
+ */
 static void attitude_update(struct attitude_state *state,
                             const struct imu_sample *sample)
 {
@@ -73,6 +89,7 @@ static void attitude_update(struct attitude_state *state,
     state->last_timestamp_ms = sample->timestamp_ms;
 }
 
+/* Wrap angle in degrees into [-180.0, +180.0). */
 static float wrap_angle_deg(float angle)
 {
     angle = fmodf(angle + 180.0f, 360.0f);
@@ -82,6 +99,7 @@ static float wrap_angle_deg(float angle)
     return angle - 180.0f;
 }
 
+/* Rotate body-frame acceleration into world ENU frame using ZYX Euler angles. */
 static void rotate_body_to_world(const struct attitude_state *attitude,
                                  const struct imu_sample *sample,
                                  float *world_x,
@@ -110,6 +128,10 @@ static void rotate_body_to_world(const struct attitude_state *attitude,
                (cp * cr) * sample->az_mps2;
 }
 
+/*
+ * Project valid GPS fix into local East-North-Up (X=East, Y=North, Z=Up) meters
+ * relative to the first valid fix, and estimate velocity by finite differences.
+ */
 static void position_from_gps(struct position_state *position,
                               const struct telemetry_snapshot *snapshot)
 {
@@ -183,6 +205,11 @@ static void position_from_gps(struct position_state *position,
     position->last_gps_valid = true;
 }
 
+/*
+ * Dead-reckoning inertial fallback (Section 2.4.9): rotate body acceleration
+ * to world frame, subtract calibrated gravity along Z, and integrate VX/VY/VZ
+ * and X/Y/Z between GPS fixes (or continuously indoors with FLAGS bit 6 set).
+ */
 static void position_integrate_inertial(struct position_state *position,
                                         const struct attitude_state *attitude,
                                         const struct imu_sample *sample,
@@ -517,6 +544,11 @@ void processing_engine_init(struct processing_engine *engine,
     engine->position.integration_origin_valid = true;
 }
 
+/*
+ * Main 25 Hz processing step called under snapshot_mutex for every valid
+ * MPU6050 sample: calibrates gyro bias, updates attitude and local ENU motion,
+ * advances 30 s statistics, and evaluates tracker state & FLAGS bitmask.
+ */
 void processing_engine_process_imu(struct processing_engine *engine,
                                    const struct imu_sample *sample,
                                    struct telemetry_snapshot *snapshot)

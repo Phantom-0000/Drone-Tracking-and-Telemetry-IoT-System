@@ -1,11 +1,18 @@
 #ifndef PROCESSING_H
 #define PROCESSING_H
 
+/*
+ * Telemetry processing pipeline: start-up IMU still calibration, gyroscope
+ * Euler attitude integration, GPS/inertial local ENU motion estimation,
+ * 30-second rolling window statistics, and tracker state classification.
+ */
+
 #include <stdbool.h>
 #include <stdint.h>
 
 #include "telemetry_snapshot.h"
 
+/* Gyroscope-integrated Euler angles starting at 0 deg after calibration. */
 struct attitude_state {
     uint32_t last_timestamp_ms;
     float roll_deg;
@@ -14,6 +21,7 @@ struct attitude_state {
     bool initialized;
 };
 
+/* Local East-North-Up (ENU) position and velocity estimator state. */
 struct position_state {
     bool origin_valid;
     bool integration_origin_valid;
@@ -35,6 +43,7 @@ struct position_state {
     bool last_imu_valid;
 };
 
+/* Accumulators for the 5-channel 30-second NORMAL mode statistics window. */
 struct statistics_state {
     uint32_t window_start_ms;
     uint32_t valid_counts[5];
@@ -71,6 +80,7 @@ struct imu_calibration {
     bool done;
 };
 
+/* Thresholds, hysteresis bands, and persistence timers for state detection. */
 struct state_detector_config {
     float idle_acceleration_tolerance_mps2;
     float idle_gyro_threshold_dps;
@@ -86,6 +96,7 @@ struct state_detector_config {
     uint32_t imu_calibration_ms;
 };
 
+/* Persistence-filtered state machine state (IDLE / FLYING / PROBLEM). */
 struct state_detector {
     enum tracker_state state;
     enum tracker_state candidate_state;
@@ -93,6 +104,7 @@ struct state_detector {
     bool candidate_valid;
 };
 
+/* Top-level processing context owned exclusively by processing_thread. */
 struct processing_engine {
     struct attitude_state attitude;
     struct position_state position;
@@ -104,13 +116,16 @@ struct processing_engine {
     float cos_problem_tilt;
 };
 
+/* Reset processing state and precompute cosine tilt thresholds. */
 void processing_engine_init(struct processing_engine *engine,
                             const struct state_detector_config *config);
 
+/* Process one valid 25 Hz IMU sample and update the shared snapshot. */
 void processing_engine_process_imu(struct processing_engine *engine,
                                    const struct imu_sample *sample,
                                    struct telemetry_snapshot *snapshot);
 
+/* Advance statistics window and fault state when an IMU read fails. */
 void processing_engine_process_imu_fault(struct processing_engine *engine,
                                          uint32_t timestamp_ms,
                                          struct telemetry_snapshot *snapshot);

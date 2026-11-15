@@ -30,7 +30,7 @@ Pressing button **`B1` (`PA0`)** cycles through the operating modes:
 
 The firmware avoids busy-wait polling so the CPU enters idle sleep (`WFI`) between sensor and timer events:
 
-- **`processing_thread` (Priority 4, 2048 B)**: Consumes `imu_event_queue`, performs a `2000 ms` start-up still calibration, runs complementary roll/pitch estimation, evaluates the hysteresis/persistence state machine (`IDLE` / `FLYING` / `PROBLEM`), updates local position/velocity estimates, and maintains 30-second rolling statistics.
+- **`processing_thread` (Priority 4, 2048 B)**: Consumes `imu_event_queue`, performs a `2000 ms` start-up still calibration, runs gyroscope Euler attitude integration, evaluates the hysteresis/persistence state machine (`IDLE` / `FLYING` / `PROBLEM`), updates local position/velocity estimates, and maintains 30-second rolling statistics.
 - **`imu_thread` (Priority 5, 1536 B)**: Samples the MPU6050 every `40 ms` (`25 Hz`) and pushes events to `imu_event_queue`.
 - **`gps_thread` (Priority 6, 1536 B)**: Parses the latest interrupt-captured GGA sentence every `1000 ms` with a `3000 ms` staleness timeout.
 - **`environment_thread` (Priority 7, 1536 B)**: Reads the Si7021 and LDR ADC channel every `2000 ms`.
