@@ -10,7 +10,7 @@ The node acquires 6-axis inertial data, GPS position and UTC time, ambient light
 | :--- | :--- | :--- | :--- |
 | **IMU** | MPU6050 (`0x68`) | `PB8` SCL (CN10-27)<br>`PB9` SDA (CN10-26) | `I2C1` @ `100 kHz`; soft reset (`0x80`), `PWR_MGMT_1=0x00`, `PWR_MGMT_2=0x00`, `±2 g`, `±250 °/s`, sampled at `25 Hz` |
 | **Temp / RH** | Si7021 (`0x40`) | `PB8` SCL, `PB9` SDA | Shared `I2C1` (mutex-protected); No-Hold Master RH (`0xF5`) + Read Previous Temp (`0xE0`), sampled every `2000 ms` |
-| **GPS** | PA6H Breakout | `PB6` TX (CN10-35)<br>`PB7` RX (CN10-37) | `USART1` @ `9600 8N1` (interrupt-driven RX); configured via `$PMTK314` for GGA-only output (`$GPGGA` / `$GNGGA`), processed every `1000 ms` |
+| **GPS** | PA6H Breakout | `PB7` TX (CN10-37)<br>`PB6` RX (CN10-35) | `USART1` @ `9600 8N1` (interrupt-driven RX); configured via `$PMTK314` for GGA-only output (`$GPGGA` / `$GNGGA`), processed every `1000 ms` |
 | **Ambient Light** | LDR Voltage Divider | `PB1` / `A0` (CN7-28) | `ADC1_IN5`, `12-bit` (`0–4095`), internal reference, max acquisition time (`160.5` cycles), mapped to `0–100%`, sampled every `2000 ms` |
 | **Status LED** | Common-Anode RGB | `PB11` R (CN10-30)<br>`PB10` G (CN10-25)<br>`PB15` B (CN10-28) | Active-low GPIO digital outputs |
 | **Mode Button** | On-board `B1` (`sw0`) | `PA0` | GPIO edge interrupt with `200 ms` software debounce |
