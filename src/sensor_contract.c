@@ -103,7 +103,7 @@ enum sensor_result ldr_map_percent(uint16_t adc_raw,
     float mapped;
 
     if (calibration == NULL || out == NULL || light_percent == NULL ||
-        calibration->maximum_raw <= calibration->dark_raw) {
+        calibration->maximum_raw == calibration->dark_raw) {
         return SENSOR_INVALID;
     }
 
@@ -113,19 +113,33 @@ enum sensor_result ldr_map_percent(uint16_t adc_raw,
         /* ADC rail: open or shorted voltage divider fault. */
         return SENSOR_INVALID;
     }
-    if (adc_raw < calibration->dark_raw) {
-        /* Darker than the calibrated 0 % point. */
-        *light_percent = 0.0f;
-        return SENSOR_OVERFLOW;
-    }
-    if (adc_raw > calibration->maximum_raw) {
-        /* Brighter than the calibrated 100 % point. */
-        *light_percent = 100.0f;
-        return SENSOR_OVERFLOW;
+
+    if (calibration->maximum_raw > calibration->dark_raw) {
+        /* Pull-down divider: brighter light increases ADC voltage. */
+        if (adc_raw < calibration->dark_raw) {
+            *light_percent = 0.0f;
+            return SENSOR_OVERFLOW;
+        }
+        if (adc_raw > calibration->maximum_raw) {
+            *light_percent = 100.0f;
+            return SENSOR_OVERFLOW;
+        }
+        mapped = 100.0f * (float)(adc_raw - calibration->dark_raw) /
+                 (float)(calibration->maximum_raw - calibration->dark_raw);
+    } else {
+        /* Pull-up LDR module (e.g. Keyes KY-018): brighter light lowers R_ldr and ADC voltage. */
+        if (adc_raw > calibration->dark_raw) {
+            *light_percent = 0.0f;
+            return SENSOR_OVERFLOW;
+        }
+        if (adc_raw < calibration->maximum_raw) {
+            *light_percent = 100.0f;
+            return SENSOR_OVERFLOW;
+        }
+        mapped = 100.0f * (float)(calibration->dark_raw - adc_raw) /
+                 (float)(calibration->dark_raw - calibration->maximum_raw);
     }
 
-    mapped = 100.0f * (float)(adc_raw - calibration->dark_raw) /
-             (float)(calibration->maximum_raw - calibration->dark_raw);
     *light_percent = clamp_float(mapped, 0.0f, 100.0f);
     return SENSOR_OK;
 }
@@ -441,23 +455,13 @@ enum sensor_result sensor_mock_read_ldr(uint32_t timestamp_ms,
  * direct register-level bus transactions over black-box high-level drivers).
  */
 #define MPU6050_I2C_ADDR            0x68U
-#define MPU6050_REG_CONFIG          0x1AU /* DLPF_CFG */
+#define MPU6050_REG_CONFIG          0x1AU /* DLPF_CFG = 0 (default) */
 #define MPU6050_REG_GYRO_CONFIG     0x1BU /* FS_SEL = 0 -> +/-250 dps */
 #define MPU6050_REG_ACCEL_CONFIG    0x1CU /* AFS_SEL = 0 -> +/-2g */
 #define MPU6050_REG_ACCEL_XOUT_H    0x3BU /* 14-byte burst: Accel(6)+Temp(2)+Gyro(6) */
-#define MPU6050_REG_PWR_MGMT_1      0x6BU
-/*
- * PWR_MGMT_1 = 0x09: SLEEP = 0 (wake), TEMP_DIS = 1 (die temperature sensor
- * unused, powered down), CLKSEL = 1 (PLL with gyro X reference, more stable
- * than the internal 8 MHz oscillator recommended by the datasheet).
- */
-#define MPU6050_PWR_MGMT_1_VALUE    0x09U
-/*
- * CONFIG = 0x05: DLPF_CFG = 5 -> accel 10 Hz / gyro 10 Hz bandwidth. The
- * application samples at 25 Hz (Nyquist 12.5 Hz), so this is the anti-alias
- * filter and also reduces the noise seen by the state detector.
- */
-#define MPU6050_CONFIG_VALUE        0x05U
+#define MPU6050_REG_SIGNAL_RESET    0x68U /* Analog/digital signal path reset */
+#define MPU6050_REG_PWR_MGMT_1      0x6BU /* 0x80 = reset, 0x00 = wake (all analog refs on) */
+#define MPU6050_REG_PWR_MGMT_2      0x6CU /* 0x00 = all 6 accel/gyro axes active */
 
 #define SI7021_I2C_ADDR             0x40U
 #define SI7021_CMD_MEAS_RH_NO_HOLD  0xF5U /* Measure RH, No Hold Master Mode */
@@ -526,7 +530,7 @@ static void gps_uart_isr(const struct device *dev, void *user_data)
 
     while (uart_irq_update(dev) && uart_irq_is_pending(dev)) {
         if (!uart_irq_rx_ready(dev)) {
-            continue;
+            break;
         }
 
         uint8_t buffer[32];
@@ -593,16 +597,34 @@ enum sensor_result sensor_hw_read_imu(uint32_t timestamp_ms,
 
     for (int try_wake = 0; try_wake < 2; ++try_wake) {
         if (!mpu6050_initialized) {
-            static const uint8_t wake_cmd[2] = {MPU6050_REG_PWR_MGMT_1,
-                                                MPU6050_PWR_MGMT_1_VALUE};
-            static const uint8_t dlpf_cfg[2] = {MPU6050_REG_CONFIG,
-                                                MPU6050_CONFIG_VALUE};
+            static const uint8_t reset_cmd[2] = {MPU6050_REG_PWR_MGMT_1, 0x80U};
+            static const uint8_t wake_cmd[2] = {MPU6050_REG_PWR_MGMT_1, 0x00U};
+            static const uint8_t sig_rst[2] = {MPU6050_REG_SIGNAL_RESET, 0x07U};
+            static const uint8_t axes_on[2] = {MPU6050_REG_PWR_MGMT_2, 0x00U};
+            static const uint8_t dlpf_cfg[2] = {MPU6050_REG_CONFIG, 0x00U};
             static const uint8_t gyro_cfg[2] = {MPU6050_REG_GYRO_CONFIG, 0x00U};
             static const uint8_t accel_cfg[2] = {MPU6050_REG_ACCEL_CONFIG, 0x00U};
 
             k_mutex_lock(&i2c1_bus_mutex, K_FOREVER);
+            rc = i2c_write(i2c1_dev, reset_cmd, sizeof(reset_cmd),
+                           MPU6050_I2C_ADDR);
+            k_mutex_unlock(&i2c1_bus_mutex);
+            if (rc != 0) {
+                return SENSOR_BUS_ERROR;
+            }
+            k_msleep(50);
+
+            k_mutex_lock(&i2c1_bus_mutex, K_FOREVER);
             rc = i2c_write(i2c1_dev, wake_cmd, sizeof(wake_cmd),
                            MPU6050_I2C_ADDR);
+            if (rc == 0) {
+                rc = i2c_write(i2c1_dev, sig_rst, sizeof(sig_rst),
+                               MPU6050_I2C_ADDR);
+            }
+            if (rc == 0) {
+                rc = i2c_write(i2c1_dev, axes_on, sizeof(axes_on),
+                               MPU6050_I2C_ADDR);
+            }
             if (rc == 0) {
                 rc = i2c_write(i2c1_dev, dlpf_cfg, sizeof(dlpf_cfg),
                                MPU6050_I2C_ADDR);
@@ -667,9 +689,9 @@ enum sensor_result sensor_hw_read_imu(uint32_t timestamp_ms,
 }
 
 /*
- * Trigger a Si7021 No-Hold Master relative-humidity conversion (0xF5), sleep
- * 30 ms for completion, read the 16-bit RH word, then read the co-sampled
- * die temperature via command 0xE0 without starting a second conversion.
+ * Trigger a Si7021 No-Hold Master relative-humidity conversion (0xF5), release
+ * I2C1 during the 30 ms conversion so 25 Hz MPU6050 reads are never blocked,
+ * then read the 16-bit RH word and co-sampled temperature (0xE0).
  */
 enum sensor_result sensor_hw_read_environment(uint32_t timestamp_ms,
                                               struct environment_sample *out)
@@ -689,17 +711,16 @@ enum sensor_result sensor_hw_read_environment(uint32_t timestamp_ms,
     uint8_t temp_bytes[2] = {0};
     int rc = -1;
 
-    /*
-     * Hold the I2C1 bus mutex across the 30 ms conversion (once every 2 s)
-     * so Si7021 has finished its max 22.8 ms RH+Temp conversion before the
-     * read and never NACKs or collides with MPU6050 transfers on I2C1.
-     */
     k_mutex_lock(&i2c1_bus_mutex, K_FOREVER);
     rc = i2c_write(i2c1_dev, &cmd_rh, 1U, SI7021_I2C_ADDR);
+    k_mutex_unlock(&i2c1_bus_mutex);
+
     if (rc == 0) {
         k_msleep(30);
         for (int attempt = 0; attempt < 3; ++attempt) {
+            k_mutex_lock(&i2c1_bus_mutex, K_FOREVER);
             rc = i2c_read(i2c1_dev, rh_bytes, 2U, SI7021_I2C_ADDR);
+            k_mutex_unlock(&i2c1_bus_mutex);
             if (rc == 0) {
                 break;
             }
@@ -707,10 +728,11 @@ enum sensor_result sensor_hw_read_environment(uint32_t timestamp_ms,
         }
     }
     if (rc == 0) {
+        k_mutex_lock(&i2c1_bus_mutex, K_FOREVER);
         rc = i2c_write_read(i2c1_dev, SI7021_I2C_ADDR, &cmd_prev_temp, 1U,
                             temp_bytes, 2U);
+        k_mutex_unlock(&i2c1_bus_mutex);
     }
-    k_mutex_unlock(&i2c1_bus_mutex);
 
     if (rc != 0) {
         return SENSOR_BUS_ERROR;

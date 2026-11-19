@@ -61,12 +61,12 @@ config APP_USE_MOCK_SENSORS
 
 config APP_LDR_DARK_RAW
     int "LDR dark calibration ADC value"
-    default 150
+    default 4000
     range 0 65535
 
 config APP_LDR_MAX_RAW
     int "LDR maximum-light calibration ADC value"
-    default 3600
+    default 80
     range 1 65535
 
 config APP_IMU_CALIBRATION_MS

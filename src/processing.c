@@ -18,6 +18,7 @@
 #define STATISTICS_WINDOW_MS 30000U
 #define STANDARD_GRAVITY_MPS2 9.80665f
 #define DEG_TO_RAD 0.017453292519943295f
+#define RAD_TO_DEG 57.295779513082320876f
 
 /* Start-up calibration acceptance limits. */
 #define CALIBRATION_MAX_GYRO_DPS 20.0f
@@ -29,27 +30,51 @@
 
 /* Tilt is only estimated while |a| is close to gravity (quasi-static). */
 #define TILT_MAX_ACCEL_DEV_MPS2 2.5f
+/* First-order complementary filter gain for accelerometer roll/pitch fusion. */
+#define ATTITUDE_ACCEL_GAIN 0.12f
+/* Avoid noisy atan2(ay, az) roll updates near +/-90 deg pitch gimbal lock. */
+#define ATTITUDE_ROLL_MIN_YZ_RATIO 0.25f
+/* Suppress residual Z-gyro drift in yaw while the tracker is stationary. */
+#define YAW_STATIONARY_DEADBAND_DPS 0.5f
+
+/* Inertial-only dead-reckoning drift suppression (soft deadband + damping). */
+#define INERTIAL_ACCEL_DEADBAND_MPS2 0.25f
+#define INERTIAL_VELOCITY_DAMPING_TAU_S 1.0f
+#define INERTIAL_MAX_SPEED_MPS 20.0f
 
 static float abs_f(float x)
 {
     return x < 0.0f ? -x : x;
 }
 
-/* Euclidean norm sqrt(x^2 + y^2 + z^2) via 12-iteration Newton-Raphson. */
+static float apply_deadband(float value, float deadband)
+{
+    if (value > deadband) {
+        return value - deadband;
+    }
+    if (value < -deadband) {
+        return value + deadband;
+    }
+    return 0.0f;
+}
+
+static float clamp_symmetric(float value, float limit)
+{
+    if (value > limit) {
+        return limit;
+    }
+    if (value < -limit) {
+        return -limit;
+    }
+    return value;
+}
+
+/* Euclidean norm sqrt(x^2 + y^2 + z^2). */
 static float magnitude3(float x, float y, float z)
 {
     float sum = x * x + y * y + z * z;
-    float guess;
-    int i;
 
-    if (!(sum > 0.0f)) {
-        return 0.0f;
-    }
-    guess = sum > 1.0f ? sum * 0.5f : 1.0f;
-    for (i = 0; i < 12; ++i) {
-        guess = 0.5f * (guess + sum / guess);
-    }
-    return guess;
+    return sum > 0.0f ? sqrtf(sum) : 0.0f;
 }
 
 /* Compute bounded integration step dt in seconds (clamped to 200 ms on stalls). */
@@ -67,28 +92,6 @@ static float clamp_dt_seconds(uint32_t previous_ms, uint32_t current_ms)
     return (float)delta_ms / 1000.0f;
 }
 
-/*
- * Forward Euler integration of bias-corrected gyroscope rates (SR4).
- * Starts at zero orientation; accumulates slow drift without external reference.
- */
-static void attitude_update(struct attitude_state *state,
-                            const struct imu_sample *sample)
-{
-    float dt;
-
-    if (!state->initialized) {
-        state->last_timestamp_ms = sample->timestamp_ms;
-        state->initialized = true;
-        return;
-    }
-
-    dt = clamp_dt_seconds(state->last_timestamp_ms, sample->timestamp_ms);
-    state->roll_deg += sample->gx_dps * dt;
-    state->pitch_deg += sample->gy_dps * dt;
-    state->yaw_deg += sample->gz_dps * dt;
-    state->last_timestamp_ms = sample->timestamp_ms;
-}
-
 /* Wrap angle in degrees into [-180.0, +180.0). */
 static float wrap_angle_deg(float angle)
 {
@@ -97,6 +100,65 @@ static float wrap_angle_deg(float angle)
         angle += 360.0f;
     }
     return angle - 180.0f;
+}
+
+/*
+ * Complementary filter attitude estimator:
+ *  - Initializes roll and pitch from the accelerometer gravity vector.
+ *  - Integrates bias-corrected gyroscope rates on every 25 Hz step.
+ *  - Pulls roll and pitch toward accelerometer tilt under quasi-static
+ *    conditions to prevent unbounded drift while keeping gyro smoothness.
+ */
+static void attitude_update(struct attitude_state *state,
+                            const struct imu_sample *sample,
+                            float accel_magnitude,
+                            float gravity_mps2,
+                            bool imu_stationary)
+{
+    bool quasi_static = accel_magnitude > 0.0f &&
+                        abs_f(accel_magnitude - gravity_mps2) <=
+                            TILT_MAX_ACCEL_DEV_MPS2;
+    float yz_norm = sqrtf(sample->ay_mps2 * sample->ay_mps2 +
+                          sample->az_mps2 * sample->az_mps2);
+    float accel_pitch_deg = atan2f(-sample->ax_mps2, yz_norm) * RAD_TO_DEG;
+    bool roll_observable = yz_norm >= gravity_mps2 * ATTITUDE_ROLL_MIN_YZ_RATIO;
+    float accel_roll_deg = roll_observable
+                               ? atan2f(sample->ay_mps2, sample->az_mps2) *
+                                     RAD_TO_DEG
+                               : state->roll_deg;
+
+    if (!state->initialized) {
+        state->last_timestamp_ms = sample->timestamp_ms;
+        if (quasi_static) {
+            state->pitch_deg = wrap_angle_deg(accel_pitch_deg);
+            state->roll_deg =
+                roll_observable ? wrap_angle_deg(accel_roll_deg) : 0.0f;
+        }
+        state->initialized = true;
+        return;
+    }
+
+    float dt = clamp_dt_seconds(state->last_timestamp_ms, sample->timestamp_ms);
+    state->roll_deg = wrap_angle_deg(state->roll_deg + sample->gx_dps * dt);
+    state->pitch_deg = wrap_angle_deg(state->pitch_deg + sample->gy_dps * dt);
+    if (!imu_stationary ||
+        abs_f(sample->gz_dps) >= YAW_STATIONARY_DEADBAND_DPS) {
+        state->yaw_deg = wrap_angle_deg(state->yaw_deg + sample->gz_dps * dt);
+    }
+    state->last_timestamp_ms = sample->timestamp_ms;
+
+    if (quasi_static) {
+        float pitch_error = wrap_angle_deg(accel_pitch_deg - state->pitch_deg);
+
+        state->pitch_deg = wrap_angle_deg(state->pitch_deg +
+                                          ATTITUDE_ACCEL_GAIN * pitch_error);
+        if (roll_observable) {
+            float roll_error = wrap_angle_deg(accel_roll_deg - state->roll_deg);
+
+            state->roll_deg = wrap_angle_deg(state->roll_deg +
+                                             ATTITUDE_ACCEL_GAIN * roll_error);
+        }
+    }
 }
 
 /* Rotate body-frame acceleration into world ENU frame using ZYX Euler angles. */
@@ -207,18 +269,23 @@ static void position_from_gps(struct position_state *position,
 
 /*
  * Dead-reckoning inertial fallback (Section 2.4.9): rotate body acceleration
- * to world frame, subtract calibrated gravity along Z, and integrate VX/VY/VZ
- * and X/Y/Z between GPS fixes (or continuously indoors with FLAGS bit 6 set).
+ * to world frame, subtract calibrated gravity along Z, apply Zero-Velocity
+ * Update (ZUPT) while stationary, and integrate VX/VY/VZ and X/Y/Z with a
+ * soft linear-acceleration deadband and velocity damping when GPS is absent.
  */
 static void position_integrate_inertial(struct position_state *position,
                                         const struct attitude_state *attitude,
                                         const struct imu_sample *sample,
-                                        float gravity_mps2)
+                                        float gravity_mps2,
+                                        bool imu_stationary,
+                                        bool gps_fix)
 {
     float dt;
     float world_x;
     float world_y;
     float world_z;
+    float linear_x;
+    float linear_y;
     float linear_z;
 
     if (!position->integration_origin_valid || attitude == NULL ||
@@ -238,14 +305,47 @@ static void position_integrate_inertial(struct position_state *position,
         return;
     }
 
+    if (imu_stationary) {
+        if (!gps_fix) {
+            /* Zero-Velocity Update (ZUPT): hold position and zero velocity at rest. */
+            position->vx_mps = 0.0f;
+            position->vy_mps = 0.0f;
+            position->vz_mps = 0.0f;
+        } else {
+            /* Coast smoothly on the latest GPS velocity between 1 Hz fixes. */
+            position->x_m += position->vx_mps * dt;
+            position->y_m += position->vy_mps * dt;
+            position->z_m += position->vz_mps * dt;
+        }
+        return;
+    }
+
     rotate_body_to_world(attitude, sample, &world_x, &world_y, &world_z);
-    linear_z = world_z - gravity_mps2;
-    position->x_m += position->vx_mps * dt + 0.5f * world_x * dt * dt;
-    position->y_m += position->vy_mps * dt + 0.5f * world_y * dt * dt;
+    linear_x = apply_deadband(world_x, INERTIAL_ACCEL_DEADBAND_MPS2);
+    linear_y = apply_deadband(world_y, INERTIAL_ACCEL_DEADBAND_MPS2);
+    linear_z = apply_deadband(world_z - gravity_mps2,
+                              INERTIAL_ACCEL_DEADBAND_MPS2);
+
+    position->x_m += position->vx_mps * dt + 0.5f * linear_x * dt * dt;
+    position->y_m += position->vy_mps * dt + 0.5f * linear_y * dt * dt;
     position->z_m += position->vz_mps * dt + 0.5f * linear_z * dt * dt;
-    position->vx_mps += world_x * dt;
-    position->vy_mps += world_y * dt;
+    position->vx_mps += linear_x * dt;
+    position->vy_mps += linear_y * dt;
     position->vz_mps += linear_z * dt;
+
+    if (!gps_fix) {
+        float damping = 1.0f - (dt / INERTIAL_VELOCITY_DAMPING_TAU_S);
+
+        if (damping < 0.0f) {
+            damping = 0.0f;
+        }
+        position->vx_mps = clamp_symmetric(position->vx_mps * damping,
+                                           INERTIAL_MAX_SPEED_MPS);
+        position->vy_mps = clamp_symmetric(position->vy_mps * damping,
+                                           INERTIAL_MAX_SPEED_MPS);
+        position->vz_mps = clamp_symmetric(position->vz_mps * damping,
+                                           INERTIAL_MAX_SPEED_MPS);
+    }
 }
 
 static void statistics_reset(struct statistics_state *statistics,
@@ -431,6 +531,9 @@ static void calibration_restart(struct imu_calibration *calibration,
 {
     calibration->window_start_ms = timestamp_ms;
     calibration->samples = 0U;
+    calibration->sum_ax = 0.0f;
+    calibration->sum_ay = 0.0f;
+    calibration->sum_az = 0.0f;
     calibration->sum_gx = 0.0f;
     calibration->sum_gy = 0.0f;
     calibration->sum_gz = 0.0f;
@@ -442,6 +545,9 @@ static void calibration_restart(struct imu_calibration *calibration,
 static void calibration_finish(struct imu_calibration *calibration,
                                bool use_measurement)
 {
+    calibration->accel_bias_x_mps2 = 0.0f;
+    calibration->accel_bias_y_mps2 = 0.0f;
+    calibration->accel_bias_z_mps2 = 0.0f;
     calibration->gyro_bias_x_dps = 0.0f;
     calibration->gyro_bias_y_dps = 0.0f;
     calibration->gyro_bias_z_dps = 0.0f;
@@ -449,6 +555,9 @@ static void calibration_finish(struct imu_calibration *calibration,
 
     if (use_measurement && calibration->samples > 0U) {
         float count = (float)calibration->samples;
+        float mean_ax = calibration->sum_ax / count;
+        float mean_ay = calibration->sum_ay / count;
+        float mean_az = calibration->sum_az / count;
         float gravity = calibration->sum_accel_magnitude / count;
 
         calibration->gyro_bias_x_dps = calibration->sum_gx / count;
@@ -456,7 +565,16 @@ static void calibration_finish(struct imu_calibration *calibration,
         calibration->gyro_bias_z_dps = calibration->sum_gz / count;
         if (gravity >= CALIBRATION_MIN_GRAVITY_MPS2 &&
             gravity <= CALIBRATION_MAX_GRAVITY_MPS2) {
-            calibration->gravity_mps2 = gravity;
+            /*
+             * Board is stationary and level during start-up calibration
+             * (expected vector: [0, 0, +g]). Removing the residual 3-axis
+             * accelerometer offset aligns both raw acceleration and the
+             * complementary filter's level reference.
+             */
+            calibration->accel_bias_x_mps2 = mean_ax;
+            calibration->accel_bias_y_mps2 = mean_ay;
+            calibration->accel_bias_z_mps2 = mean_az - STANDARD_GRAVITY_MPS2;
+            calibration->gravity_mps2 = STANDARD_GRAVITY_MPS2;
         }
     }
     calibration->active = false;
@@ -515,6 +633,9 @@ static bool calibration_update(struct imu_calibration *calibration,
         return true;
     }
 
+    calibration->sum_ax += sample->ax_mps2;
+    calibration->sum_ay += sample->ay_mps2;
+    calibration->sum_az += sample->az_mps2;
     calibration->sum_gx += sample->gx_dps;
     calibration->sum_gy += sample->gy_dps;
     calibration->sum_gz += sample->gz_dps;
@@ -546,14 +667,15 @@ void processing_engine_init(struct processing_engine *engine,
 
 /*
  * Main 25 Hz processing step called under snapshot_mutex for every valid
- * MPU6050 sample: calibrates gyro bias, updates attitude and local ENU motion,
- * advances 30 s statistics, and evaluates tracker state & FLAGS bitmask.
+ * MPU6050 sample: calibrates gyro/accel bias, updates attitude and local ENU
+ * motion, advances 30 s statistics, and evaluates tracker state & FLAGS bitmask.
  */
 void processing_engine_process_imu(struct processing_engine *engine,
                                    const struct imu_sample *sample,
                                    struct telemetry_snapshot *snapshot)
 {
     struct imu_sample corrected = *sample;
+    float raw_accel_magnitude;
     float acceleration_magnitude;
     float raw_gyro_magnitude;
     float angular_velocity_magnitude;
@@ -563,19 +685,25 @@ void processing_engine_process_imu(struct processing_engine *engine,
     bool gps_updated = false;
     bool moderate_tilt = false;
     bool severe_tilt = false;
+    bool imu_stationary = false;
 
-    acceleration_magnitude = magnitude3(sample->ax_mps2, sample->ay_mps2,
-                                         sample->az_mps2);
+    raw_accel_magnitude = magnitude3(sample->ax_mps2, sample->ay_mps2,
+                                     sample->az_mps2);
     raw_gyro_magnitude = magnitude3(sample->gx_dps, sample->gy_dps,
                                     sample->gz_dps);
     calibrating = calibration_update(&engine->calibration, sample,
-                                     acceleration_magnitude, raw_gyro_magnitude,
+                                     raw_accel_magnitude, raw_gyro_magnitude,
                                      engine->cos_flying_tilt);
 
+    corrected.ax_mps2 -= engine->calibration.accel_bias_x_mps2;
+    corrected.ay_mps2 -= engine->calibration.accel_bias_y_mps2;
+    corrected.az_mps2 -= engine->calibration.accel_bias_z_mps2;
     corrected.gx_dps -= engine->calibration.gyro_bias_x_dps;
     corrected.gy_dps -= engine->calibration.gyro_bias_y_dps;
     corrected.gz_dps -= engine->calibration.gyro_bias_z_dps;
     gravity_mps2 = engine->calibration.gravity_mps2;
+    acceleration_magnitude = magnitude3(corrected.ax_mps2, corrected.ay_mps2,
+                                        corrected.az_mps2);
     angular_velocity_magnitude = magnitude3(corrected.gx_dps, corrected.gy_dps,
                                             corrected.gz_dps);
 
@@ -586,6 +714,30 @@ void processing_engine_process_imu(struct processing_engine *engine,
     snapshot->gy_dps = corrected.gy_dps;
     snapshot->gz_dps = corrected.gz_dps;
 
+    /*
+     * Tilt from the accelerometer, assuming the sensor Z axis points up when
+     * the tracker is level. A multirotor tilts to produce horizontal thrust,
+     * so a sustained moderate tilt means flight; a severe tilt or inversion
+     * means the drone has tipped over or crashed. The estimate is restricted
+     * to quasi-static conditions (|a| close to gravity) so horizontal shaking
+     * while flat cannot spoof a severe tilt angle.
+     */
+    if (acceleration_magnitude > 0.0f &&
+        abs_f(acceleration_magnitude - gravity_mps2) <= TILT_MAX_ACCEL_DEV_MPS2) {
+        float cos_tilt = corrected.az_mps2 / acceleration_magnitude;
+
+        severe_tilt = cos_tilt <= engine->cos_problem_tilt;
+        moderate_tilt = !severe_tilt && cos_tilt <= engine->cos_flying_tilt;
+    }
+
+    imu_stationary =
+        !calibrating &&
+        abs_f(acceleration_magnitude - gravity_mps2) <=
+            engine->detector_config.idle_acceleration_tolerance_mps2 &&
+        angular_velocity_magnitude <=
+            engine->detector_config.idle_gyro_threshold_dps &&
+        !moderate_tilt && !severe_tilt;
+
     if (!snapshot->gps_fix) {
         engine->position.last_gps_valid = false;
     } else if (snapshot->gps_timestamp_ms != engine->position.last_gps_timestamp_ms) {
@@ -594,19 +746,18 @@ void processing_engine_process_imu(struct processing_engine *engine,
     }
 
     if (calibrating) {
-        /* Zero initial orientation is defined at the end of calibration. */
+        /* Initial orientation is aligned from the accelerometer after calibration. */
         snapshot->flags |= TELEMETRY_FLAG_CALIBRATION_PENDING;
         engine->attitude.initialized = false;
         engine->position.last_imu_valid = false;
     } else {
         snapshot->flags &= ~TELEMETRY_FLAG_CALIBRATION_PENDING;
-        attitude_update(&engine->attitude, &corrected);
-        engine->attitude.roll_deg = wrap_angle_deg(engine->attitude.roll_deg);
-        engine->attitude.pitch_deg = wrap_angle_deg(engine->attitude.pitch_deg);
-        engine->attitude.yaw_deg = wrap_angle_deg(engine->attitude.yaw_deg);
+        attitude_update(&engine->attitude, &corrected, acceleration_magnitude,
+                        gravity_mps2, imu_stationary);
         if (!gps_updated) {
             position_integrate_inertial(&engine->position, &engine->attitude,
-                                        &corrected, gravity_mps2);
+                                        &corrected, gravity_mps2,
+                                        imu_stationary, snapshot->gps_fix);
         }
     }
 
@@ -632,22 +783,6 @@ void processing_engine_process_imu(struct processing_engine *engine,
         snapshot->flags |= TELEMETRY_FLAG_INERTIAL_ONLY;
     } else {
         snapshot->flags &= ~TELEMETRY_FLAG_INERTIAL_ONLY;
-    }
-
-    /*
-     * Tilt from the accelerometer, assuming the sensor Z axis points up when
-     * the tracker is level. A multirotor tilts to produce horizontal thrust,
-     * so a sustained moderate tilt means flight; a severe tilt or inversion
-     * means the drone has tipped over or crashed. The estimate is restricted
-     * to quasi-static conditions (|a| close to gravity) so horizontal shaking
-     * while flat cannot spoof a severe tilt angle.
-     */
-    if (acceleration_magnitude > 0.0f &&
-        abs_f(acceleration_magnitude - gravity_mps2) <= TILT_MAX_ACCEL_DEV_MPS2) {
-        float cos_tilt = corrected.az_mps2 / acceleration_magnitude;
-
-        severe_tilt = cos_tilt <= engine->cos_problem_tilt;
-        moderate_tilt = !severe_tilt && cos_tilt <= engine->cos_flying_tilt;
     }
 
     still_calibrating = calibrating && engine->calibration.samples > 0U;

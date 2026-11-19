@@ -5,7 +5,7 @@
  * - I2C1 (MPU6050 @ 0x68, Si7021 @ 0x40): SCL = PB8 (CN10-27), SDA = PB9 (CN10-26)
  * - USART1 (GPS PA6H @ 9600 8N1): TX = PB6 (CN10-35), RX = PB7 (CN10-37)
  * - ADC1 IN5 (LDR divider): PB1 / A0 (CN7-28)
- * - RGB LED (Common Cathode, ACTIVE_HIGH): R = PB11 (CN10-30), G = PB10 (CN10-25), B = PB15 (CN10-28)
+ * - RGB LED (Common Anode, ACTIVE_LOW): R = PB11 (CN10-30), G = PB10 (CN10-25), B = PB15 (CN10-28)
  * - B1 mode button (sw0): PA0
  */
 
@@ -27,8 +27,16 @@
     };
 };
 
-&green_led_2 {
-    gpios = <&gpiob 10 GPIO_ACTIVE_HIGH>;
+&leds {
+    led_0 {
+        gpios = <&gpiob 15 GPIO_ACTIVE_LOW>;
+    };
+    led_1 {
+        gpios = <&gpiob 10 GPIO_ACTIVE_LOW>;
+    };
+    led_2 {
+        gpios = <&gpiob 11 GPIO_ACTIVE_LOW>;
+    };
 };
 
 &pwm2 {

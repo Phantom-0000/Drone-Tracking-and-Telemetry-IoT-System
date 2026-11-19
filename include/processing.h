@@ -66,12 +66,18 @@ struct imu_calibration {
     uint32_t first_start_ms;
     uint32_t window_start_ms;
     uint32_t samples;
+    float sum_ax;
+    float sum_ay;
+    float sum_az;
     float sum_gx;
     float sum_gy;
     float sum_gz;
     float sum_accel_magnitude;
     float min_accel_magnitude;
     float max_accel_magnitude;
+    float accel_bias_x_mps2;
+    float accel_bias_y_mps2;
+    float accel_bias_z_mps2;
     float gyro_bias_x_dps;
     float gyro_bias_y_dps;
     float gyro_bias_z_dps;

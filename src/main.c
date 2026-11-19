@@ -1,8 +1,8 @@
 /*
  * Zephyr RTOS application entry point and multi-rate task orchestration for
  * the STM32WL55JC Drone Tracking and Telemetry Node:
- *  - Coordinates 6 preemptive threads, bounded static message queues, mutexes,
- *    interrupt-driven LPUART1 VCOM output, and B1 GPIO button interrupts.
+ *  - Coordinates 4 dedicated sensor/processing threads, the main output loop,
+ *    System Workqueue button handling, bounded queues, and mutexes.
  *  - Ensures zero busy-wait polling so the idle thread enters low-power WFI.
  */
 
@@ -489,16 +489,13 @@ static void processing_thread(void *p1, void *p2, void *p3)
 }
 
 /*
- * Exclusive owner of the ST-LINK Virtual COM port (GR5 / SM6). Blocks on
+ * Exclusive owner of the ST-LINK Virtual COM port (GR5 / SM6), executed on
+ * the main thread after priority demotion to priority 8. Blocks on
  * output_timer (2 s TEST, 5 s NORMAL, 100 ms SIMU), copies a coherent local
  * snapshot, and transmits either human-readable reports or 221-byte SIMU frames.
  */
-static void output_thread(void *p1, void *p2, void *p3)
+static void run_output_loop(void)
 {
-    ARG_UNUSED(p1);
-    ARG_UNUSED(p2);
-    ARG_UNUSED(p3);
-
     while (true) {
         struct telemetry_snapshot local_snapshot;
         static enum app_mode last_output_mode = APP_MODE_TEST;
@@ -517,8 +514,8 @@ static void output_thread(void *p1, void *p2, void *p3)
         local_snapshot.timestamp_ms = output_timestamp_ms;
 
         /*
-         * output_thread is the only VCOM writer: it applies the mode LED
-         * policy and emits the TEST, NORMAL or SIMU output for this period.
+         * Single VCOM writer: applies the mode LED policy and emits the
+         * TEST, NORMAL or SIMU output for this period.
          */
         enum app_mode mode = (enum app_mode)atomic_get(&active_mode);
         enum tracker_state state = local_snapshot.state;
@@ -567,13 +564,47 @@ static void output_thread(void *p1, void *p2, void *p3)
 }
 
 /*
- * Called from the B1 GPIO interrupt (b1_button_isr). It only queues the
- * press timestamp; mode_thread performs the debounced transition and the
- * output timer update in thread context.
+ * Deferred B1 button handler executed on Zephyr's System Workqueue. Drains
+ * queued press timestamps without blocking, applies 200 ms software debouncing,
+ * cycles the active mode (TEST -> NORMAL -> SIMU -> TEST), and reschedules
+ * output_timer, avoiding a dedicated mode thread stack.
+ */
+static void mode_button_work_handler(struct k_work *work)
+{
+    uint32_t timestamp_ms;
+
+    ARG_UNUSED(work);
+
+    while (k_msgq_get(&mode_button_queue, &timestamp_ms, K_NO_WAIT) == 0) {
+        if (!mode_manager_accept_button(&mode_manager, timestamp_ms)) {
+            continue;
+        }
+
+        mode_manager.mode = mode_manager_next_mode(mode_manager.mode);
+        atomic_set(&active_mode, mode_manager.mode);
+        enum tracker_state state;
+
+        k_mutex_lock(&snapshot_mutex, K_FOREVER);
+        state = snapshot.state;
+        k_mutex_unlock(&snapshot_mutex);
+        apply_led_color(mode_manager_led_for(mode_manager.mode, state));
+        k_timer_start(&output_timer,
+                      K_MSEC(mode_manager_period_ms(mode_manager.mode)),
+                      K_MSEC(mode_manager_period_ms(mode_manager.mode)));
+    }
+}
+
+K_WORK_DEFINE(mode_button_work, mode_button_work_handler);
+
+/*
+ * Called from the B1 GPIO interrupt (b1_button_isr). Queues the press
+ * timestamp and submits mode_button_work to the System Workqueue.
  */
 void app_b1_button_pressed(uint32_t timestamp_ms)
 {
-    (void)k_msgq_put(&mode_button_queue, &timestamp_ms, K_NO_WAIT);
+    if (k_msgq_put(&mode_button_queue, &timestamp_ms, K_NO_WAIT) == 0) {
+        (void)k_work_submit(&mode_button_work);
+    }
 }
 
 static void b1_button_isr(const struct device *dev,
@@ -611,67 +642,29 @@ static void init_gpio_peripherals(void)
 }
 
 /*
- * Event-driven mode manager task. Sleeps indefinitely on mode_button_queue
- * until B1 is pressed, applies 200 ms software debouncing, cycles the active
- * mode (TEST -> NORMAL -> SIMU -> TEST), and reschedules output_timer.
- */
-static void mode_thread(void *p1, void *p2, void *p3)
-{
-    ARG_UNUSED(p1);
-    ARG_UNUSED(p2);
-    ARG_UNUSED(p3);
-
-    while (true) {
-        uint32_t timestamp_ms;
-
-        (void)k_msgq_get(&mode_button_queue, &timestamp_ms, K_FOREVER);
-        if (!mode_manager_accept_button(&mode_manager, timestamp_ms)) {
-            continue;
-        }
-
-        mode_manager.mode = mode_manager_next_mode(mode_manager.mode);
-        atomic_set(&active_mode, mode_manager.mode);
-        enum tracker_state state;
-
-        k_mutex_lock(&snapshot_mutex, K_FOREVER);
-        state = snapshot.state;
-        k_mutex_unlock(&snapshot_mutex);
-        apply_led_color(mode_manager_led_for(mode_manager.mode, state));
-        k_timer_start(&output_timer,
-                      K_MSEC(mode_manager_period_ms(mode_manager.mode)),
-                      K_MSEC(mode_manager_period_ms(mode_manager.mode)));
-    }
-}
-
-/*
  * Static thread definitions (lower number = higher preemptive priority):
- *  - Prio 4: processing_thread (drains 25 Hz IMU queue immediately)
- *  - Prio 5: imu_thread        (40 ms inertial sampling cadence)
- *  - Prio 6: gps_thread        (1000 ms GGA sentence consumption)
- *  - Prio 7: environment_thread(2000 ms Si7021 + LDR sampling)
- *  - Prio 8: output_thread     (timer-driven VCOM serialization)
- *  - Prio 9: mode_thread       (B1 button mode transitions)
+ *  - Prio 4: processing_thread  (drains 25 Hz IMU queue immediately)
+ *  - Prio 5: imu_thread         (40 ms inertial sampling cadence)
+ *  - Prio 6: gps_thread         (1000 ms GGA sentence consumption)
+ *  - Prio 7: environment_thread (2000 ms Si7021 + LDR sampling)
+ *  - Prio 8: main thread        (timer-driven VCOM output loop after init)
+ *  - SysWQ:  mode_button_work   (debounced B1 mode transitions)
  */
 K_THREAD_DEFINE(imu_thread_id, 1536, imu_thread, NULL, NULL, NULL, 5, 0, 0);
 K_THREAD_DEFINE(gps_thread_id, 1536, gps_thread, NULL, NULL, NULL, 6, 0, 0);
 K_THREAD_DEFINE(environment_thread_id, 1536, environment_thread, NULL, NULL, NULL, 7, 0, 0);
 K_THREAD_DEFINE(processing_thread_id, 2048, processing_thread, NULL, NULL, NULL, 4, 0, 0);
-K_THREAD_DEFINE(output_thread_id, 2048, output_thread, NULL, NULL, NULL, 8, 0, 0);
-K_THREAD_DEFINE(mode_thread_id, 1024, mode_thread, NULL, NULL, NULL, 9, 0, 0);
 
 /*
- * Runs at priority 0 before worker threads (prio 4..9) are scheduled:
- * initializes interrupt VCOM TX, RGB LED & B1 GPIOs, initial flags, and
- * starts output_timer in TEST mode before returning cleanly.
+ * Starts at priority 0 so peripheral, mode, and snapshot initialization
+ * finishes before worker threads (prio 4..7) run; then lowers priority to 8
+ * and executes the timer-driven VCOM output loop directly on the main stack.
  */
 int main(void)
 {
     init_vcom_tx();
-    init_gpio_peripherals();
     mode_manager_init(&mode_manager, CONFIG_APP_MODE_BUTTON_DEBOUNCE_MS);
     atomic_set(&active_mode, mode_manager.mode);
-    apply_led_color(
-        mode_manager_led_for(mode_manager.mode, TRACKER_STATE_IDLE));
     snapshot.state = TRACKER_STATE_IDLE;
     snapshot.flags = TELEMETRY_FLAG_YAW_UNRELIABLE |
                      TELEMETRY_FLAG_GPS_INVALID |
@@ -681,9 +674,14 @@ int main(void)
     if (CONFIG_APP_IMU_CALIBRATION_MS > 0) {
         snapshot.flags |= TELEMETRY_FLAG_CALIBRATION_PENDING;
     }
+    init_gpio_peripherals();
+    apply_led_color(
+        mode_manager_led_for(mode_manager.mode, TRACKER_STATE_IDLE));
     k_timer_start(&output_timer,
                   K_MSEC(mode_manager_period_ms(mode_manager.mode)),
                   K_MSEC(mode_manager_period_ms(mode_manager.mode)));
 
+    k_thread_priority_set(k_current_get(), 8);
+    run_output_loop();
     return 0;
 }
